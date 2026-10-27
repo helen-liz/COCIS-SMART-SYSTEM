@@ -10,19 +10,13 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
-#include "esp_event.h"
-#include "esp_idf_version.h"
 #include "esp_log.h"
-#include "esp_netif.h"
-#include "esp_now.h"
-#include "esp_rom_sys.h"
-#include "esp_spiffs.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "freertos/task.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "communication.h"
+#include "room_profiles.h"
+#include "storage.h"
 
 /* Defaults target a classic ESP32 DevKit and an MFRC522 SPI reader. */
 #ifndef SMART_SYSTEM_SPI_HOST
@@ -49,23 +43,19 @@
 #ifndef SMART_SYSTEM_PIN_LIGHT_RELAY
 #define SMART_SYSTEM_PIN_LIGHT_RELAY 27
 #endif
-#ifndef SMART_SYSTEM_EXIT_NODE
-#define SMART_SYSTEM_EXIT_NODE 0
-#endif
-#ifndef SMART_SYSTEM_ROOM_ID
-#define SMART_SYSTEM_ROOM_ID 1
-#endif
-#ifndef SMART_SYSTEM_ROOM_NAME
-#define SMART_SYSTEM_ROOM_NAME "Lecture Room 1"
-#endif
-
 #define RFID_SPI_CLOCK_HZ 8000000
-#define MAX_ALLOWED_CARDS 32
-#define MAX_REMOTE_NODES 16
-#define SYNC_PACKET_MAGIC 0x53434331u
-#define ACCESS_LOG_PATH "/spiffs/events.csv"
 
 static const char *TAG = "smart_system";
+
+#if SMART_SYSTEM_ROOM_PROFILE == 1
+static const room_profile_t *const active_profile = &ROOM1_PROFILE;
+#elif SMART_SYSTEM_ROOM_PROFILE == 2
+static const room_profile_t *const active_profile = &ROOM2_PROFILE;
+#elif SMART_SYSTEM_ROOM_PROFILE == 0
+static const room_profile_t *const active_profile = &ENTRANCE_PROFILE;
+#else
+#error "SMART_SYSTEM_ROOM_PROFILE must be 0 (Entrance), 1 (Room 1), or 2 (Room 2)"
+#endif
 
 enum {
 	RC522_COMMAND_REG = 0x01,
@@ -83,36 +73,10 @@ enum {
 	RC522_TRANSCEIVE = 0x0C
 };
 
-typedef struct {
-	uint8_t allowed_uids[MAX_ALLOWED_CARDS][4];
-	uint8_t allowed_count;
-	uint16_t schedule_start_minute;
-	uint16_t schedule_end_minute;
-	char admin_pin[9];
-} system_config_t;
-
-typedef struct {
-	uint32_t magic;
-	uint8_t room_id;
-	uint8_t reserved[3];
-	int32_t occupancy;
-} sync_packet_t;
-
-typedef struct {
-	uint8_t mac[6];
-	int32_t occupancy;
-	TickType_t last_seen;
-	bool active;
-} remote_node_t;
-
 static spi_device_handle_t rfid_spi;
-static nvs_handle_t config_nvs;
 static system_config_t config;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
-static portMUX_TYPE remote_lock = portMUX_INITIALIZER_UNLOCKED;
-static remote_node_t remote_nodes[MAX_REMOTE_NODES];
 static int32_t local_occupancy;
-static bool spiffs_mounted;
 
 static esp_err_t rc522_write(uint8_t reg, uint8_t value)
 {
@@ -250,42 +214,6 @@ static void rc522_init(void)
 	ESP_LOGI(TAG, "MFRC522 version register: 0x%02X", version);
 }
 
-static void save_config(void)
-{
-	nvs_set_blob(config_nvs, "uids", config.allowed_uids,
-				 sizeof(config.allowed_uids));
-	nvs_set_u8(config_nvs, "uid_count", config.allowed_count);
-	nvs_set_u16(config_nvs, "start_min", config.schedule_start_minute);
-	nvs_set_u16(config_nvs, "end_min", config.schedule_end_minute);
-	nvs_set_str(config_nvs, "admin_pin", config.admin_pin);
-	ESP_ERROR_CHECK(nvs_commit(config_nvs));
-}
-
-static void load_config(void)
-{
-	memset(&config, 0, sizeof(config));
-	config.schedule_start_minute = 7 * 60;
-	config.schedule_end_minute = 22 * 60;
-	strcpy(config.admin_pin, "1234");
-
-	size_t blob_size = sizeof(config.allowed_uids);
-	nvs_get_blob(config_nvs, "uids", config.allowed_uids, &blob_size);
-	nvs_get_u8(config_nvs, "uid_count", &config.allowed_count);
-	nvs_get_u16(config_nvs, "start_min", &config.schedule_start_minute);
-	nvs_get_u16(config_nvs, "end_min", &config.schedule_end_minute);
-	size_t pin_size = sizeof(config.admin_pin);
-	nvs_get_str(config_nvs, "admin_pin", config.admin_pin, &pin_size);
-	if (config.allowed_count > MAX_ALLOWED_CARDS) {
-		config.allowed_count = 0;
-	}
-	if (config.schedule_start_minute >= 1440 ||
-		config.schedule_end_minute >= 1440 ||
-		config.schedule_start_minute >= config.schedule_end_minute) {
-		config.schedule_start_minute = 7 * 60;
-		config.schedule_end_minute = 22 * 60;
-	}
-}
-
 static bool access_window_open(void)
 {
 	time_t now = time(NULL);
@@ -311,50 +239,13 @@ static bool uid_is_allowed(const uint8_t uid[4])
 	return false;
 }
 
-static void write_event(const char *event, const uint8_t *uid, const char *detail)
-{
-	time_t now = time(NULL);
-	struct tm event_time;
-	char timestamp[24] = "time-not-set";
-	if (now >= 1760000000 && localtime_r(&now, &event_time) != NULL) {
-		strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &event_time);
-	}
-	char uid_text[12] = "--------";
-	if (uid != NULL) {
-		snprintf(uid_text, sizeof(uid_text), "%02X%02X%02X%02X",
-				 uid[0], uid[1], uid[2], uid[3]);
-	}
-	ESP_LOGI(TAG, "room=%u (%s) %s uid=%s %s",
-			 (unsigned)SMART_SYSTEM_ROOM_ID, SMART_SYSTEM_ROOM_NAME,
-			 event, uid_text, detail);
-	if (!spiffs_mounted) {
-		return;
-	}
-	FILE *log_file = fopen(ACCESS_LOG_PATH, "a");
-	if (log_file != NULL) {
-		fprintf(log_file, "%s,%u,%s,%s,%s,%s\n", timestamp,
-				(unsigned)SMART_SYSTEM_ROOM_ID, SMART_SYSTEM_ROOM_NAME,
-				event, uid_text, detail);
-		fclose(log_file);
-	}
-}
-
 static int32_t get_global_occupancy(void)
 {
 	int32_t total;
 	portENTER_CRITICAL(&state_lock);
 	total = local_occupancy;
 	portEXIT_CRITICAL(&state_lock);
-	TickType_t now = xTaskGetTickCount();
-	portENTER_CRITICAL(&remote_lock);
-	for (size_t index = 0; index < MAX_REMOTE_NODES; ++index) {
-		if (remote_nodes[index].active &&
-			(TickType_t)(now - remote_nodes[index].last_seen) < pdMS_TO_TICKS(10000)) {
-			total += remote_nodes[index].occupancy;
-		}
-	}
-	portEXIT_CRITICAL(&remote_lock);
-	return total > 0 ? total : 0;
+	return communication_get_global_occupancy(active_profile->room_id, total);
 }
 
 static void update_lighting(void)
@@ -366,11 +257,12 @@ static void handle_card(const uint8_t uid[4])
 {
 	bool allowed = uid_is_allowed(uid);
 	if (!allowed) {
-		write_event("DENIED", uid, "unknown-card");
+		storage_write_event(active_profile, "DENIED", uid, "unknown-card");
 		return;
 	}
 	if (!access_window_open()) {
-		write_event("DENIED", uid, "outside-schedule-or-clock-unset");
+		storage_write_event(active_profile, "DENIED", uid,
+						"outside-schedule-or-clock-unset");
 		return;
 	}
 
@@ -379,21 +271,21 @@ static void handle_card(const uint8_t uid[4])
 	gpio_set_level(SMART_SYSTEM_PIN_DOOR_RELAY, 0);
 
 	portENTER_CRITICAL(&state_lock);
-	if (SMART_SYSTEM_EXIT_NODE) {
+	if (active_profile->exit_node) {
 		--local_occupancy;
 	} else {
 		++local_occupancy;
 	}
 	int32_t occupancy = local_occupancy;
 	portEXIT_CRITICAL(&state_lock);
-	nvs_set_i32(config_nvs, "occupancy", occupancy);
-	ESP_ERROR_CHECK(nvs_commit(config_nvs));
+	storage_save_occupancy(occupancy);
 	update_lighting();
-	write_event(SMART_SYSTEM_EXIT_NODE ? "EXIT" : "ENTRY", uid,
-				SMART_SYSTEM_EXIT_NODE ? "occupancy-decremented" : "occupancy-incremented");
+	storage_write_event(active_profile, active_profile->exit_node ? "EXIT" : "ENTRY", uid,
+					active_profile->exit_node ? "occupancy-decremented" :
+												"occupancy-incremented");
 	ESP_LOGI(TAG, "%s (room %u): local contribution %" PRId32
 			 "; room occupancy %" PRId32,
-			 SMART_SYSTEM_ROOM_NAME, (unsigned)SMART_SYSTEM_ROOM_ID, occupancy,
+			 active_profile->name, (unsigned)active_profile->room_id, occupancy,
 			 get_global_occupancy());
 }
 
@@ -437,8 +329,8 @@ static void print_status(void)
 {
 	printf("Room: %s (ID %u) | terminal: %s | local contribution: %" PRId32
 		   " | room occupancy: %" PRId32 "\n",
-		   SMART_SYSTEM_ROOM_NAME, (unsigned)SMART_SYSTEM_ROOM_ID,
-		   SMART_SYSTEM_EXIT_NODE ? "exit" : "entry", local_occupancy,
+		   active_profile->name, (unsigned)active_profile->room_id,
+		   active_profile->exit_node ? "exit" : "entry", local_occupancy,
 		   get_global_occupancy());
 	printf("Allowed cards: %u | schedule: %02u:%02u-%02u:%02u | clock: ",
 		   config.allowed_count, config.schedule_start_minute / 60,
@@ -458,20 +350,7 @@ static void print_status(void)
 
 static void print_logs(void)
 {
-	if (!spiffs_mounted) {
-		printf("Local log storage is unavailable.\n");
-		return;
-	}
-	FILE *log_file = fopen(ACCESS_LOG_PATH, "r");
-	if (log_file == NULL) {
-		printf("No events recorded yet.\n");
-		return;
-	}
-	char line[160];
-	while (fgets(line, sizeof(line), log_file) != NULL) {
-		fputs(line, stdout);
-	}
-	fclose(log_file);
+	storage_print_logs();
 }
 
 static void console_task(void *argument)
@@ -541,7 +420,7 @@ static void console_task(void *argument)
 						   config.allowed_uids[config.allowed_count], 4);
 					memset(config.allowed_uids[config.allowed_count], 0, 4);
 				}
-				save_config();
+				storage_save_config(&config);
 				printf("Allowlist updated (%u cards).\n", config.allowed_count);
 			} else if (strcmp(command, "schedule") == 0) {
 				uint16_t start;
@@ -553,7 +432,7 @@ static void console_task(void *argument)
 				}
 				config.schedule_start_minute = start;
 				config.schedule_end_minute = end;
-				save_config();
+				storage_save_config(&config);
 				printf("Schedule saved.\n");
 			} else if (strcmp(command, "time") == 0) {
 				int year, month, day, hour, minute, second;
@@ -589,7 +468,7 @@ static void console_task(void *argument)
 				}
 				if (argument_one != NULL) {
 					strcpy(config.admin_pin, argument_one);
-					save_config();
+					storage_save_config(&config);
 					printf("Administrator PIN changed.\n");
 				}
 			}
@@ -599,107 +478,11 @@ static void console_task(void *argument)
 	}
 }
 
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
-static void espnow_receive(const esp_now_recv_info_t *info, const uint8_t *data,
-						   int data_length)
-#else
-static void espnow_receive(const uint8_t *mac_address, const uint8_t *data,
-						   int data_length)
-#endif
-{
-	if (data_length != sizeof(sync_packet_t)) {
-		return;
-	}
-	sync_packet_t packet;
-	memcpy(&packet, data, sizeof(packet));
-	if (packet.magic != SYNC_PACKET_MAGIC || packet.room_id != SMART_SYSTEM_ROOM_ID) {
-		return;
-	}
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
-    const uint8_t *mac_address = info->src_addr;
-#endif
-	portENTER_CRITICAL(&remote_lock);
-	size_t slot = MAX_REMOTE_NODES;
-	for (size_t index = 0; index < MAX_REMOTE_NODES; ++index) {
-		if (remote_nodes[index].active &&
-			memcmp(remote_nodes[index].mac, mac_address, 6) == 0) {
-			slot = index;
-			break;
-		}
-		if (!remote_nodes[index].active && slot == MAX_REMOTE_NODES) {
-			slot = index;
-		}
-	}
-	if (slot < MAX_REMOTE_NODES) {
-		memcpy(remote_nodes[slot].mac, mac_address, 6);
-		remote_nodes[slot].occupancy = packet.occupancy;
-		remote_nodes[slot].last_seen = xTaskGetTickCount();
-		remote_nodes[slot].active = true;
-	}
-	portEXIT_CRITICAL(&remote_lock);
-}
-
-static void initialize_espnow(void)
-{
-	ESP_ERROR_CHECK(esp_netif_init());
-	ESP_ERROR_CHECK(esp_event_loop_create_default());
-	esp_netif_create_default_wifi_sta();
-	wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
-	ESP_ERROR_CHECK(esp_wifi_init(&wifi_config));
-	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-	ESP_ERROR_CHECK(esp_wifi_start());
-	ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
-	ESP_ERROR_CHECK(esp_now_init());
-	ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_receive));
-
-	esp_now_peer_info_t peer = {0};
-	memset(peer.peer_addr, 0xFF, sizeof(peer.peer_addr));
-	peer.channel = 1;
-	peer.ifidx = WIFI_IF_STA;
-	peer.encrypt = false;
-	ESP_ERROR_CHECK(esp_now_add_peer(&peer));
-	ESP_LOGI(TAG, "ESP-NOW occupancy synchronization active on channel 1");
-}
-
-static void broadcast_occupancy(void)
-{
-	static const uint8_t broadcast_address[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-	sync_packet_t packet = {
-		.magic = SYNC_PACKET_MAGIC,
-		.room_id = SMART_SYSTEM_ROOM_ID,
-		.occupancy = local_occupancy,
-	};
-	esp_err_t result = esp_now_send(broadcast_address, (const uint8_t *)&packet,
-									sizeof(packet));
-	if (result != ESP_OK && result != ESP_ERR_ESPNOW_NO_MEM) {
-		ESP_LOGW(TAG, "Occupancy broadcast failed: %s", esp_err_to_name(result));
-	}
-}
-
 void app_main(void)
 {
-	esp_err_t nvs_result = nvs_flash_init();
-	if (nvs_result == ESP_ERR_NVS_NO_FREE_PAGES ||
-		nvs_result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-		ESP_ERROR_CHECK(nvs_flash_erase());
-		ESP_ERROR_CHECK(nvs_flash_init());
-	} else {
-		ESP_ERROR_CHECK(nvs_result);
-	}
-	ESP_ERROR_CHECK(nvs_open("smart_system", NVS_READWRITE, &config_nvs));
-	load_config();
-	nvs_get_i32(config_nvs, "occupancy", &local_occupancy);
-
-	esp_vfs_spiffs_conf_t spiffs_config = {
-		.base_path = "/spiffs",
-		.partition_label = NULL,
-		.max_files = 4,
-		.format_if_mount_failed = true,
-	};
-	spiffs_mounted = esp_vfs_spiffs_register(&spiffs_config) == ESP_OK;
-	if (!spiffs_mounted) {
-		ESP_LOGW(TAG, "SPIFFS unavailable; access events will be logged to serial only");
-	}
+	storage_init();
+	storage_load_config(&config);
+	storage_load_occupancy(&local_occupancy);
 
 	gpio_config_t output_gpio = {
 		.pin_bit_mask = (1ULL << SMART_SYSTEM_PIN_DOOR_RELAY) |
@@ -727,14 +510,14 @@ void app_main(void)
 	};
 	ESP_ERROR_CHECK(spi_bus_add_device(SMART_SYSTEM_SPI_HOST, &device_config, &rfid_spi));
 	rc522_init();
-	initialize_espnow();
+	ESP_ERROR_CHECK(communication_init(active_profile->room_id));
 
 	ESP_ERROR_CHECK(xTaskCreate(console_task, "serial_console", 4096, NULL, 5, NULL) == pdPASS
 						? ESP_OK
 						: ESP_FAIL);
 	ESP_LOGI(TAG, "Terminal ready: room %u (%s), %s; default admin PIN is 1234",
-			 (unsigned)SMART_SYSTEM_ROOM_ID, SMART_SYSTEM_ROOM_NAME,
-			 SMART_SYSTEM_EXIT_NODE ? "exit" : "entry");
+			 (unsigned)active_profile->room_id, active_profile->name,
+			 active_profile->exit_node ? "exit" : "entry");
 
 	uint8_t last_uid[4] = {0};
 	TickType_t last_card_tick = 0;
@@ -753,7 +536,7 @@ void app_main(void)
 			memset(last_uid, 0, sizeof(last_uid));
 		}
 		if ((TickType_t)(now - last_broadcast_tick) >= pdMS_TO_TICKS(1000)) {
-			broadcast_occupancy();
+			communication_broadcast_occupancy(active_profile->room_id, local_occupancy);
 			last_broadcast_tick = now;
 		}
 		vTaskDelay(pdMS_TO_TICKS(50));
