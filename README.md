@@ -1,4 +1,8 @@
-# CCIS Smart Control and Monitoring System
+# COCIS-SMART-SYSTEM
+
+A system for securing valuable equipment against unauthorized access.
+
+## Smart Control and Monitoring System
 
 Each ESP32 is assigned to a room and to an entry or exit door. It reads four-byte MFRC522 UIDs, checks a persistent administrator-managed allowlist and daily access schedule, actuates a door relay, updates occupancy, controls that room's lighting, logs events, and broadcasts signed occupancy contributions to nearby terminals over ESP-NOW. See [the room map and diagrams](docs/system-diagrams.md).
 
