@@ -43,7 +43,11 @@
 #ifndef SMART_SYSTEM_PIN_LIGHT_RELAY
 #define SMART_SYSTEM_PIN_LIGHT_RELAY 27
 #endif
+#ifndef SMART_SYSTEM_PIN_PIR
+#define SMART_SYSTEM_PIN_PIR 32
+#endif
 #define RFID_SPI_CLOCK_HZ 8000000
+#define PIR_LIGHT_HOLD_MS 30000
 
 static const char *TAG = "smart_system";
 
@@ -77,6 +81,8 @@ static spi_device_handle_t rfid_spi;
 static system_config_t config;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static int32_t local_occupancy;
+static TickType_t last_motion_tick;
+static bool motion_hold_active;
 
 static esp_err_t rc522_write(uint8_t reg, uint8_t value)
 {
@@ -250,6 +256,20 @@ static int32_t get_global_occupancy(void)
 
 static void update_lighting(void)
 {
+	if (active_profile->room_id != 0) {
+		TickType_t now = xTaskGetTickCount();
+		bool motion_detected = gpio_get_level(SMART_SYSTEM_PIN_PIR) != 0;
+		if (motion_detected) {
+			last_motion_tick = now;
+			motion_hold_active = true;
+		} else if (motion_hold_active &&
+				   (TickType_t)(now - last_motion_tick) >=
+					   pdMS_TO_TICKS(PIR_LIGHT_HOLD_MS)) {
+			motion_hold_active = false;
+		}
+		gpio_set_level(SMART_SYSTEM_PIN_LIGHT_RELAY, motion_hold_active ? 1 : 0);
+		return;
+	}
 	gpio_set_level(SMART_SYSTEM_PIN_LIGHT_RELAY, get_global_occupancy() > 0 ? 1 : 0);
 }
 
@@ -345,6 +365,11 @@ static void print_status(void)
 		localtime_r(&now, &local_time);
 		strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &local_time);
 		printf("%s\n", timestamp);
+	}
+	if (active_profile->room_id != 0) {
+		printf("Room light: %s | PIR: %s\n",
+			   gpio_get_level(SMART_SYSTEM_PIN_LIGHT_RELAY) ? "ON" : "OFF",
+			   gpio_get_level(SMART_SYSTEM_PIN_PIR) ? "motion" : "clear");
 	}
 }
 
@@ -492,6 +517,14 @@ void app_main(void)
 	ESP_ERROR_CHECK(gpio_config(&output_gpio));
 	gpio_set_level(SMART_SYSTEM_PIN_DOOR_RELAY, 0);
 	gpio_set_level(SMART_SYSTEM_PIN_LIGHT_RELAY, 0);
+	if (active_profile->room_id != 0) {
+		gpio_config_t presence_gpio = {
+			.pin_bit_mask = 1ULL << SMART_SYSTEM_PIN_PIR,
+			.mode = GPIO_MODE_INPUT,
+			.pull_down_en = GPIO_PULLDOWN_ENABLE,
+		};
+		ESP_ERROR_CHECK(gpio_config(&presence_gpio));
+	}
 
 	spi_bus_config_t bus_config = {
 		.sclk_io_num = SMART_SYSTEM_PIN_SCK,
@@ -539,6 +572,7 @@ void app_main(void)
 			communication_broadcast_occupancy(active_profile->room_id, local_occupancy);
 			last_broadcast_tick = now;
 		}
+		update_lighting();
 		vTaskDelay(pdMS_TO_TICKS(50));
 	}
 }

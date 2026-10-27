@@ -18,6 +18,13 @@
       "attrs": {}
     },
     {
+      "type": "wokwi-pir-motion-sensor",
+      "id": "room_pir",
+      "top": 105,
+      "left": 600,
+      "attrs": {}
+    },
+    {
       "type": "wokwi-relay-module",
       "id": "door_relay",
       "top": 235,
@@ -70,6 +77,9 @@
     [ "esp:22", "rfid:RST", "green", [] ],
     [ "esp:3V3", "rfid:3.3V", "red", [] ],
     [ "esp:GND.1", "rfid:GND", "black", [] ],
+    [ "esp:5V", "room_pir:VCC", "red", [] ],
+    [ "esp:32", "room_pir:OUT", "green", [] ],
+    [ "esp:GND.1", "room_pir:GND", "black", [] ],
     [ "esp:26", "door_relay:IN", "blue", [] ],
     [ "esp:27", "light_relay:IN", "blue", [] ],
     [ "esp:5V", "door_relay:VCC", "red", [] ],
