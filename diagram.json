@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "author": "CCIS Smart Control and Monitoring System",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-esp32-devkit-v1",
+      "id": "esp",
+      "top": 20,
+      "left": 20,
+      "attrs": { "env": "esp-idf" }
+    },
+    {
+      "type": "wokwi-rc522",
+      "id": "rfid",
+      "top": 45,
+      "left": 360,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-relay-module",
+      "id": "door_relay",
+      "top": 235,
+      "left": 325,
+      "attrs": { "transistor": "npn" }
+    },
+    {
+      "type": "wokwi-relay-module",
+      "id": "light_relay",
+      "top": 380,
+      "left": 325,
+      "attrs": { "transistor": "npn" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "door_load_resistor",
+      "top": 245,
+      "left": 590,
+      "rotate": 90,
+      "attrs": { "value": "220" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "door_indicator",
+      "top": 245,
+      "left": 665,
+      "attrs": { "color": "red", "label": "Door strike indicator" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "light_load_resistor",
+      "top": 390,
+      "left": 590,
+      "rotate": 90,
+      "attrs": { "value": "220" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "room_light",
+      "top": 390,
+      "left": 665,
+      "attrs": { "color": "yellow", "label": "Room light indicator" }
+    }
+  ],
+  "connections": [
+    [ "esp:18", "rfid:SCK", "green", [] ],
+    [ "esp:23", "rfid:MOSI", "green", [] ],
+    [ "esp:19", "rfid:MISO", "green", [] ],
+    [ "esp:5", "rfid:SDA", "green", [] ],
+    [ "esp:22", "rfid:RST", "green", [] ],
+    [ "esp:3V3", "rfid:3.3V", "red", [] ],
+    [ "esp:GND.1", "rfid:GND", "black", [] ],
+    [ "esp:26", "door_relay:IN", "blue", [] ],
+    [ "esp:27", "light_relay:IN", "blue", [] ],
+    [ "esp:5V", "door_relay:VCC", "red", [] ],
+    [ "esp:5V", "light_relay:VCC", "red", [] ],
+    [ "esp:GND.2", "door_relay:GND", "black", [] ],
+    [ "esp:GND.2", "light_relay:GND", "black", [] ],
+    [ "esp:5V", "door_relay:COM", "red", [] ],
+    [ "door_relay:NO", "door_load_resistor:1", "orange", [] ],
+    [ "door_load_resistor:2", "door_indicator:A", "orange", [] ],
+    [ "door_indicator:C", "esp:GND.2", "black", [] ],
+    [ "esp:5V", "light_relay:COM", "red", [] ],
+    [ "light_relay:NO", "light_load_resistor:1", "orange", [] ],
+    [ "light_load_resistor:2", "room_light:A", "orange", [] ],
+    [ "room_light:C", "esp:GND.2", "black", [] ]
+  ],
+  "serialMonitor": { "display": "auto", "newline": "lf" }
+}
