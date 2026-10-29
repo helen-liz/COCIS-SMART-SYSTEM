@@ -323,6 +323,8 @@ static esp_err_t flush(void)
 
 esp_err_t display_init(void)
 {
+	vTaskDelay(pdMS_TO_TICKS(100));
+
 	i2c_master_bus_config_t bus_config = {
 		.i2c_port = I2C_NUM_0,
 		.sda_io_num = SMART_SYSTEM_PIN_OLED_SDA,
@@ -340,7 +342,7 @@ esp_err_t display_init(void)
 	i2c_device_config_t device_config = {
 		.dev_addr_length = I2C_ADDR_BIT_LEN_7,
 		.device_address = SSD1306_ADDRESS,
-		.scl_speed_hz = 400000,
+		.scl_speed_hz = 100000,
 	};
 	result = i2c_master_bus_add_device(i2c_bus, &device_config, &ssd1306);
 	if (result != ESP_OK) {
