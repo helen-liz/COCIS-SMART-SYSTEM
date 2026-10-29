@@ -39,6 +39,16 @@ idf.py menuconfig     # CoCIS Smart System -> Terminal role
 idf.py build
 ```
 
+To build Lecture Room 2 separately, run:
+
+```bat
+build-room2.bat
+use-room2.bat
+```
+
+Then start Wokwi. The role-specific build is kept in `build-room2/` and the
+launcher copies its firmware into the `build/` paths referenced by `wokwi.toml`.
+
 For Wokwi, open the project folder and start the simulation. `wokwi.toml` points to
 `build/flasher_args.json` and `build/Smart-System.elf`.
 
