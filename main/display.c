@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #define SSD1306_ADDRESS 0x3C
+#define SSD1306_ALT_ADDRESS 0x3D
 #define SSD1306_TIMEOUT_MS 50
 #define DISPLAY_REFRESH_MS 500
 #define EVENT_OVERLAY_MS 2500
@@ -354,8 +355,17 @@ esp_err_t display_init(void)
 	};
 	result = command(init_sequence, sizeof(init_sequence));
 	if (result != ESP_OK) {
-		ESP_LOGW(TAG, "SSD1306 init failed: %s", esp_err_to_name(result));
-		return result;
+		i2c_master_bus_rm_device(ssd1306);
+		device_config.device_address = SSD1306_ALT_ADDRESS;
+		result = i2c_master_bus_add_device(i2c_bus, &device_config, &ssd1306);
+		if (result == ESP_OK) {
+			result = command(init_sequence, sizeof(init_sequence));
+		}
+	}
+	if (result != ESP_OK) {
+		ESP_LOGW(TAG, "SSD1306 unavailable on 0x3C/0x3D; serial UI remains active");
+		ssd1306 = NULL;
+		return ESP_OK;
 	}
 	display_available = true;
 	memset(framebuffer, 0, sizeof(framebuffer));
