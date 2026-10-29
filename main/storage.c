@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -77,12 +79,38 @@ void storage_save_config(const system_config_t *config)
 
 void storage_load_occupancy(int32_t *occupancy)
 {
+	*occupancy = 0;
 	nvs_get_i32(config_nvs, "occupancy", occupancy);
 }
 
 void storage_save_occupancy(int32_t occupancy)
 {
 	nvs_set_i32(config_nvs, "occupancy", occupancy);
+	ESP_ERROR_CHECK(nvs_commit(config_nvs));
+}
+
+void storage_load_inside(inside_record_t *records, uint8_t *count)
+{
+	memset(records, 0, sizeof(inside_record_t) * MAX_INSIDE_RECORDS);
+	*count = 0;
+	size_t blob_size = sizeof(inside_record_t) * MAX_INSIDE_RECORDS;
+	if (nvs_get_blob(config_nvs, "inside", records, &blob_size) != ESP_OK) {
+		return;
+	}
+	nvs_get_u8(config_nvs, "inside_count", count);
+	if (*count > MAX_INSIDE_RECORDS) {
+		*count = 0;
+	}
+}
+
+void storage_save_inside(const inside_record_t *records, uint8_t count)
+{
+	if (count > MAX_INSIDE_RECORDS) {
+		count = MAX_INSIDE_RECORDS;
+	}
+	nvs_set_blob(config_nvs, "inside", records,
+				 sizeof(inside_record_t) * MAX_INSIDE_RECORDS);
+	nvs_set_u8(config_nvs, "inside_count", count);
 	ESP_ERROR_CHECK(nvs_commit(config_nvs));
 }
 
@@ -105,8 +133,12 @@ void storage_write_event(const room_profile_t *profile, const char *event,
 	if (!spiffs_mounted) {
 		return;
 	}
+	bool new_file = access(ACCESS_LOG_PATH, F_OK) != 0;
 	FILE *log_file = fopen(ACCESS_LOG_PATH, "a");
 	if (log_file != NULL) {
+		if (new_file) {
+			fprintf(log_file, "timestamp,room_id,room,event,uid,detail\n");
+		}
 		fprintf(log_file, "%s,%u,%s,%s,%s,%s\n", timestamp,
 				(unsigned)profile->room_id, profile->name, event, uid_text, detail);
 		fclose(log_file);
@@ -129,4 +161,49 @@ void storage_print_logs(void)
 		fputs(line, stdout);
 	}
 	fclose(log_file);
+}
+
+size_t storage_read_logs(char *buffer, size_t max_size)
+{
+	if (buffer == NULL || max_size == 0) {
+		return 0;
+	}
+	buffer[0] = '\0';
+	if (!spiffs_mounted) {
+		return 0;
+	}
+	FILE *log_file = fopen(ACCESS_LOG_PATH, "r");
+	if (log_file == NULL) {
+		return 0;
+	}
+	size_t total = 0;
+	while (total + 1 < max_size) {
+		size_t chunk = fread(buffer + total, 1, max_size - total - 1, log_file);
+		if (chunk == 0) {
+			break;
+		}
+		total += chunk;
+	}
+	buffer[total] = '\0';
+	fclose(log_file);
+	return total;
+}
+
+void storage_clear_logs(void)
+{
+	if (spiffs_mounted) {
+		remove(ACCESS_LOG_PATH);
+	}
+}
+
+size_t storage_log_size(void)
+{
+	if (!spiffs_mounted) {
+		return 0;
+	}
+	struct stat info;
+	if (stat(ACCESS_LOG_PATH, &info) != 0) {
+		return 0;
+	}
+	return (size_t)info.st_size;
 }

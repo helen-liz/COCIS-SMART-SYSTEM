@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #define MAX_ALLOWED_CARDS 32
+#define MAX_INSIDE_RECORDS MAX_ALLOWED_CARDS
 
 typedef struct {
 	uint8_t allowed_uids[MAX_ALLOWED_CARDS][4];
@@ -13,6 +14,12 @@ typedef struct {
 	uint16_t schedule_end_minute;
 	char admin_pin[9];
 } system_config_t;
+
+typedef struct {
+	uint8_t uid[4];
+	uint32_t entered_at;
+	bool valid;
+} inside_record_t;
 
 typedef struct {
 	uint8_t room_id;

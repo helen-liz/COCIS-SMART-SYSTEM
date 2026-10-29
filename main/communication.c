@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "communication.h"
+#include "sdkconfig.h"
 #include "esp_event.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
@@ -35,13 +36,8 @@ typedef struct {
 
 static remote_node_t remote_nodes[MAX_REMOTE_NODES];
 
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
 static void espnow_receive(const esp_now_recv_info_t *info, const uint8_t *data,
 						   int data_length)
-#else
-static void espnow_receive(const uint8_t *mac_address, const uint8_t *data,
-						   int data_length)
-#endif
 {
 	if (data_length != sizeof(sync_packet_t)) {
 		return;
@@ -51,9 +47,7 @@ static void espnow_receive(const uint8_t *mac_address, const uint8_t *data,
 	if (packet.magic != SYNC_PACKET_MAGIC) {
 		return;
 	}
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
 	const uint8_t *mac_address = info->src_addr;
-#endif
 	portENTER_CRITICAL(&remote_lock);
 	size_t slot = MAX_REMOTE_NODES;
 	for (size_t index = 0; index < MAX_REMOTE_NODES; ++index) {
@@ -82,9 +76,16 @@ esp_err_t communication_init(uint8_t room_id)
 	ESP_ERROR_CHECK(esp_netif_init());
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 	esp_netif_create_default_wifi_sta();
+#if CONFIG_SMART_SYSTEM_ENABLE_WEB
+	esp_netif_create_default_wifi_ap();
+#endif
 	wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&wifi_config));
+#if CONFIG_SMART_SYSTEM_ENABLE_WEB
+	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+#else
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+#endif
 	ESP_ERROR_CHECK(esp_wifi_start());
 	ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
 	ESP_ERROR_CHECK(esp_now_init());
@@ -128,4 +129,30 @@ int32_t communication_get_global_occupancy(uint8_t room_id, int32_t local_occupa
 	}
 	portEXIT_CRITICAL(&remote_lock);
 	return total > 0 ? total : 0;
+}
+
+size_t communication_get_remote_nodes(remote_node_info_t *nodes, size_t max_nodes)
+{
+	if (nodes == NULL || max_nodes == 0) {
+		return 0;
+	}
+	size_t found = 0;
+	TickType_t now = xTaskGetTickCount();
+	portENTER_CRITICAL(&remote_lock);
+	for (size_t index = 0; index < MAX_REMOTE_NODES && found < max_nodes; ++index) {
+		if (!remote_nodes[index].active) {
+			continue;
+		}
+		memcpy(nodes[found].mac, remote_nodes[index].mac, sizeof(nodes[found].mac));
+		nodes[found].room_id = remote_nodes[index].room_id;
+		nodes[found].occupancy = remote_nodes[index].occupancy;
+		nodes[found].age_ms =
+			(uint32_t)((TickType_t)(now - remote_nodes[index].last_seen) *
+					   portTICK_PERIOD_MS);
+		nodes[found].active =
+			(TickType_t)(now - remote_nodes[index].last_seen) < pdMS_TO_TICKS(10000);
+		++found;
+	}
+	portEXIT_CRITICAL(&remote_lock);
+	return found;
 }
