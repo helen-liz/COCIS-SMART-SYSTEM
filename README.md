@@ -107,6 +107,9 @@ light state, and the last access event. Access decisions appear as full-screen
 The serial console is the authenticated management interface. It uses ANSI colour,
 boxed tables, and a live status dashboard.
 
+Colour output is disabled by default for compatibility with the Wokwi browser
+serial monitor. Use `color on` on terminals that support ANSI escape sequences.
+
 ```text
 Monitoring: status, who, rooms, events [n], logs, stats, uptime, menu, clear
 Admin:      login <PIN>, logout, enroll [seconds], allow <UID>, deny <UID>,

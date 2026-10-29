@@ -6,7 +6,7 @@
 
 #define UI_WIDTH 60
 
-static bool color_enabled = true;
+static bool color_enabled = false;
 
 #define C_RESET "\033[0m"
 #define C_BOLD "\033[1m"
