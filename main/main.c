@@ -808,15 +808,19 @@ static void console_task(void *argument)
 	bool authenticated = false;
 	unsigned failed_logins = 0;
 	TickType_t login_lock_until = 0;
+	bool prompt_visible = false;
 	(void)argument;
 
 	while (true) {
-		if (ui_color_enabled()) {
-			printf("\033[36mSmart>\033[0m ");
-		} else {
-			printf("Smart> ");
+		if (!prompt_visible) {
+			if (ui_color_enabled()) {
+				printf("\033[36mSmart>\033[0m ");
+			} else {
+				printf("Smart> ");
+			}
+			fflush(stdout);
+			prompt_visible = true;
 		}
-		fflush(stdout);
 		if (fgets(line, sizeof(line), stdin) == NULL) {
 			vTaskDelay(pdMS_TO_TICKS(100));
 			continue;
@@ -829,6 +833,7 @@ static void console_task(void *argument)
 		if (command == NULL) {
 			continue;
 		}
+		prompt_visible = false;
 
 		if (strcmp(command, "help") == 0) {
 			ui_help();
