@@ -20,6 +20,19 @@ rebuild the firmware for each role.
 
 ## Quick start
 
+On Windows, use the included `build.bat` launcher. It loads the ESP-IDF
+environment before invoking `idf.py`, so a system-wide `idf.py` installation is
+not required:
+
+```bat
+build.bat
+```
+
+If ESP-IDF is installed somewhere other than `%USERPROFILE%\esp\esp-idf`, set
+`IDF_PATH` to that directory before running the launcher.
+
+On an ESP-IDF terminal, the equivalent commands are:
+
 ```bash
 idf.py set-target esp32
 idf.py menuconfig     # CoCIS Smart System -> Terminal role
