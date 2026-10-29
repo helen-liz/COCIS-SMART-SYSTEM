@@ -59,6 +59,22 @@ use-entrance.bat
 This builds the dual-reader entrance firmware in `build-entrance/` and switches
 the Wokwi firmware to the entrance image.
 
+### Wokwi browser upload
+
+The Wokwi browser cannot read this local repository automatically. Build the role
+you want, then open a Wokwi ESP32 project, open the command palette with `F1`,
+choose **Upload Firmware and Start Simulation...**, and select the generated
+merged binary:
+
+| Role | Build command | Upload file |
+| --- | --- | --- |
+| Lecture Room 1 | `build.bat` | `build/wokwi-firmware.bin` |
+| Lecture Room 2 | `build-room2.bat` | `build/room2-wokwi.bin` |
+| Main entrance | `build-entrance.bat` | `build/entrance-wokwi.bin` |
+
+Copy the contents of `diagram.json` into the Wokwi project before starting the
+simulation. The serial monitor then shows the selected terminal role.
+
 For Wokwi, open the project folder and start the simulation. `wokwi.toml` points to
 `build/flasher_args.json` and `build/Smart-System.elf`.
 

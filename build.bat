@@ -12,4 +12,11 @@ call "%IDF_PATH%\export.bat"
 if errorlevel 1 exit /b %errorlevel%
 
 idf.py build %*
-exit /b %errorlevel%
+if errorlevel 1 exit /b %errorlevel%
+
+idf.py merge-bin
+if errorlevel 1 exit /b %errorlevel%
+
+copy /Y build\merged-binary.bin build\wokwi-firmware.bin >nul
+echo Browser upload firmware created at build\wokwi-firmware.bin.
+exit /b 0

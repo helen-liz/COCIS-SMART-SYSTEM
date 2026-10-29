@@ -19,6 +19,10 @@ copy /Y sdkconfig.defaults build-entrance\sdkconfig.entrance >nul
 idf.py -B build-entrance -D SDKCONFIG="C:/Users/L10/COCIS-SMART-SYSTEM/build-entrance/sdkconfig.entrance" -D SDKCONFIG_DEFAULTS="" build
 if errorlevel 1 exit /b %errorlevel%
 
+idf.py -B build-entrance merge-bin
+if errorlevel 1 exit /b %errorlevel%
+
 copy /Y build-entrance\Smart-System.elf build\entrance.elf >nul
 copy /Y build-entrance\Smart-System.bin build\entrance.bin >nul
+copy /Y build-entrance\merged-binary.bin build\entrance-wokwi.bin >nul
 echo Main entrance firmware built in build\entrance.elf and build\entrance.bin.
