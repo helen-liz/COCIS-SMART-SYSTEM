@@ -49,6 +49,16 @@ use-room2.bat
 Then start Wokwi. The role-specific build is kept in `build-room2/` and the
 launcher copies its firmware into the `build/` paths referenced by `wokwi.toml`.
 
+To build and run the main entrance role, run:
+
+```bat
+build-entrance.bat
+use-entrance.bat
+```
+
+This builds the dual-reader entrance firmware in `build-entrance/` and switches
+the Wokwi firmware to the entrance image.
+
 For Wokwi, open the project folder and start the simulation. `wokwi.toml` points to
 `build/flasher_args.json` and `build/Smart-System.elf`.
 
