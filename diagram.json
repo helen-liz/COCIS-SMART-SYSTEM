@@ -103,6 +103,13 @@
       "top": 550,
       "left": 665,
       "attrs": { "color": "green", "label": "Exit door" }
+    },
+    {
+      "type": "board-sd-card",
+      "id": "sdcard",
+      "top": 670,
+      "left": 330,
+      "attrs": {}
     }
   ],
   "connections": [
@@ -154,7 +161,14 @@
     [ "esp:VIN", "exit_door_relay:COM", "red", [] ],
     [ "exit_door_relay:NO", "exit_load_resistor:1", "orange", [] ],
     [ "exit_load_resistor:2", "exit_indicator:A", "orange", [] ],
-    [ "exit_indicator:C", "esp:GND.2", "black", [] ]
+    [ "exit_indicator:C", "esp:GND.2", "black", [] ],
+
+    [ "esp:D18", "sdcard:CLK", "green", [] ],
+    [ "esp:D23", "sdcard:MOSI", "green", [] ],
+    [ "esp:D19", "sdcard:MISO", "green", [] ],
+    [ "esp:D15", "sdcard:CS", "yellow", [] ],
+    [ "esp:3V3", "sdcard:VCC", "red", [] ],
+    [ "esp:GND.2", "sdcard:GND", "black", [] ]
   ],
   "serialMonitor": { "display": "auto", "newline": "lf" }
 }
