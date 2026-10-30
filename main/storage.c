@@ -2,20 +2,33 @@
 #include <string.h>
 #include <time.h>
 
+#include "driver/sdspi_host.h"
+#include "driver/spi_common.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_vfs_fat.h"
 #include "esp_spiffs.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdmmc_cmd.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "storage.h"
 
-#define ACCESS_LOG_PATH "/spiffs/events.csv"
+#define SD_MOUNT_PATH "/sdcard"
+#define SD_LOG_PATH SD_MOUNT_PATH "/events.csv"
+#define SPIFFS_LOG_PATH "/spiffs/events.csv"
+#define SD_PIN_CS GPIO_NUM_4
 
 static const char *TAG = "smart_system_storage";
 static nvs_handle_t config_nvs;
 static bool spiffs_mounted;
+static bool sd_mounted;
+static sdmmc_card_t *sd_card;
+static SemaphoreHandle_t log_mutex;
+static const char *access_log_path = SPIFFS_LOG_PATH;
 
-void storage_init(void)
+void storage_init(spi_host_device_t spi_host)
 {
 	esp_err_t nvs_result = nvs_flash_init();
 	if (nvs_result == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -26,16 +39,43 @@ void storage_init(void)
 		ESP_ERROR_CHECK(nvs_result);
 	}
 	ESP_ERROR_CHECK(nvs_open("smart_system", NVS_READWRITE, &config_nvs));
+	log_mutex = xSemaphoreCreateMutex();
+	ESP_ERROR_CHECK(log_mutex == NULL ? ESP_ERR_NO_MEM : ESP_OK);
 
-	esp_vfs_spiffs_conf_t spiffs_config = {
-		.base_path = "/spiffs",
-		.partition_label = NULL,
+	sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+	host.slot = spi_host;
+	sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+	slot_config.host_id = spi_host;
+	slot_config.gpio_cs = SD_PIN_CS;
+	esp_vfs_fat_mount_config_t mount_config = {
+		.format_if_mount_failed = false,
 		.max_files = 4,
-		.format_if_mount_failed = true,
+		.allocation_unit_size = 16 * 1024,
 	};
-	spiffs_mounted = esp_vfs_spiffs_register(&spiffs_config) == ESP_OK;
-	if (!spiffs_mounted) {
-		ESP_LOGW(TAG, "SPIFFS unavailable; access events will be logged to serial only");
+	esp_err_t sd_result = esp_vfs_fat_sdspi_mount(SD_MOUNT_PATH, &host, &slot_config,
+											 &mount_config, &sd_card);
+	if (sd_result == ESP_OK) {
+		sd_mounted = true;
+		access_log_path = SD_LOG_PATH;
+		ESP_LOGI(TAG, "SD card mounted; event log: %s", SD_LOG_PATH);
+	} else {
+		ESP_LOGW(TAG, "SD card unavailable (%s); trying SPIFFS log storage",
+				 esp_err_to_name(sd_result));
+	}
+
+	if (!sd_mounted) {
+		esp_vfs_spiffs_conf_t spiffs_config = {
+			.base_path = "/spiffs",
+			.partition_label = NULL,
+			.max_files = 4,
+			.format_if_mount_failed = true,
+		};
+		spiffs_mounted = esp_vfs_spiffs_register(&spiffs_config) == ESP_OK;
+	}
+	if (!sd_mounted && !spiffs_mounted) {
+		ESP_LOGW(TAG, "SD and SPIFFS unavailable; access events will be logged to serial only");
+	} else if (!sd_mounted) {
+		ESP_LOGW(TAG, "Using SPIFFS fallback for access event logs");
 	}
 }
 
@@ -75,14 +115,26 @@ void storage_save_config(const system_config_t *config)
 	ESP_ERROR_CHECK(nvs_commit(config_nvs));
 }
 
-void storage_load_occupancy(int32_t *occupancy)
+void storage_load_occupancy(uint8_t room_id, int32_t *occupancy)
 {
-	nvs_get_i32(config_nvs, "occupancy", occupancy);
+	char key[8];
+	if (room_id > 2 || occupancy == NULL) {
+		return;
+	}
+	snprintf(key, sizeof(key), "occ%u", (unsigned)room_id);
+	if (nvs_get_i32(config_nvs, key, occupancy) != ESP_OK) {
+		*occupancy = 0;
+	}
 }
 
-void storage_save_occupancy(int32_t occupancy)
+void storage_save_occupancy(uint8_t room_id, int32_t occupancy)
 {
-	nvs_set_i32(config_nvs, "occupancy", occupancy);
+	char key[8];
+	if (room_id > 2) {
+		return;
+	}
+	snprintf(key, sizeof(key), "occ%u", (unsigned)room_id);
+	nvs_set_i32(config_nvs, key, occupancy);
 	ESP_ERROR_CHECK(nvs_commit(config_nvs));
 }
 
@@ -102,26 +154,32 @@ void storage_write_event(const room_profile_t *profile, const char *event,
 	}
 	ESP_LOGI(TAG, "room=%u (%s) %s uid=%s %s",
 			 (unsigned)profile->room_id, profile->name, event, uid_text, detail);
-	if (!spiffs_mounted) {
+	if (!sd_mounted && !spiffs_mounted) {
 		return;
 	}
-	FILE *log_file = fopen(ACCESS_LOG_PATH, "a");
+	xSemaphoreTake(log_mutex, portMAX_DELAY);
+	FILE *log_file = fopen(access_log_path, "a");
 	if (log_file != NULL) {
 		fprintf(log_file, "%s,%u,%s,%s,%s,%s\n", timestamp,
 				(unsigned)profile->room_id, profile->name, event, uid_text, detail);
 		fclose(log_file);
+	} else {
+		ESP_LOGW(TAG, "Could not append event to %s", access_log_path);
 	}
+	xSemaphoreGive(log_mutex);
 }
 
 void storage_print_logs(void)
 {
-	if (!spiffs_mounted) {
+	if (!sd_mounted && !spiffs_mounted) {
 		printf("Local log storage is unavailable.\n");
 		return;
 	}
-	FILE *log_file = fopen(ACCESS_LOG_PATH, "r");
+	xSemaphoreTake(log_mutex, portMAX_DELAY);
+	FILE *log_file = fopen(access_log_path, "r");
 	if (log_file == NULL) {
 		printf("No events recorded yet.\n");
+		xSemaphoreGive(log_mutex);
 		return;
 	}
 	char line[160];
@@ -129,4 +187,5 @@ void storage_print_logs(void)
 		fputs(line, stdout);
 	}
 	fclose(log_file);
+	xSemaphoreGive(log_mutex);
 }

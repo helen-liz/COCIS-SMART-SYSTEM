@@ -14,8 +14,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "freertos/task.h"
-#include "communication.h"
-#include "room_profiles.h"
 #include "storage.h"
 
 /* Defaults target a classic ESP32 DevKit and an MFRC522 SPI reader. */
@@ -31,35 +29,18 @@
 #ifndef SMART_SYSTEM_PIN_MISO
 #define SMART_SYSTEM_PIN_MISO 19
 #endif
-#ifndef SMART_SYSTEM_PIN_RFID_CS
-#define SMART_SYSTEM_PIN_RFID_CS 5
-#endif
-#ifndef SMART_SYSTEM_PIN_RFID_RST
-#define SMART_SYSTEM_PIN_RFID_RST 22
-#endif
-#ifndef SMART_SYSTEM_PIN_DOOR_RELAY
-#define SMART_SYSTEM_PIN_DOOR_RELAY 26
-#endif
-#ifndef SMART_SYSTEM_PIN_LIGHT_RELAY
-#define SMART_SYSTEM_PIN_LIGHT_RELAY 27
-#endif
-#ifndef SMART_SYSTEM_PIN_PIR
-#define SMART_SYSTEM_PIN_PIR 32
-#endif
 #define RFID_SPI_CLOCK_HZ 8000000
 #define PIR_LIGHT_HOLD_MS 30000
+#define RFID_RESET_GPIO GPIO_NUM_26
+#define ROOM1_LIGHT_GPIO GPIO_NUM_27
+#define ROOM2_LIGHT_GPIO GPIO_NUM_14
+#define ROOM1_PIR_GPIO GPIO_NUM_34
+#define ROOM2_PIR_GPIO GPIO_NUM_35
+#define ROOM1_DOOR_GPIO GPIO_NUM_32
+#define ROOM2_DOOR_GPIO GPIO_NUM_33
+#define ENTRANCE_DOOR_GPIO GPIO_NUM_25
 
 static const char *TAG = "smart_system";
-
-#if SMART_SYSTEM_ROOM_PROFILE == 1
-static const room_profile_t *const active_profile = &ROOM1_PROFILE;
-#elif SMART_SYSTEM_ROOM_PROFILE == 2
-static const room_profile_t *const active_profile = &ROOM2_PROFILE;
-#elif SMART_SYSTEM_ROOM_PROFILE == 0
-static const room_profile_t *const active_profile = &ENTRANCE_PROFILE;
-#else
-#error "SMART_SYSTEM_ROOM_PROFILE must be 0 (Entrance), 1 (Room 1), or 2 (Room 2)"
-#endif
 
 enum {
 	RC522_COMMAND_REG = 0x01,
@@ -77,24 +58,47 @@ enum {
 	RC522_TRANSCEIVE = 0x0C
 };
 
-static spi_device_handle_t rfid_spi;
+typedef struct {
+	room_profile_t profile;
+	gpio_num_t chip_select_gpio;
+	spi_device_handle_t spi;
+} access_terminal_t;
+
+static access_terminal_t terminals[] = {
+	{{1, "Lecture Room 1 Entry", false}, GPIO_NUM_5, NULL},
+	{{1, "Lecture Room 1 Exit", true}, GPIO_NUM_16, NULL},
+	{{2, "Lecture Room 2 Entry", false}, GPIO_NUM_17, NULL},
+	{{2, "Lecture Room 2 Exit", true}, GPIO_NUM_21, NULL},
+	{{0, "Main Entrance Entry", false}, GPIO_NUM_22, NULL},
+	{{0, "Main Entrance Exit", true}, GPIO_NUM_13, NULL},
+};
+
+#define TERMINAL_COUNT (sizeof(terminals) / sizeof(terminals[0]))
+
+static const gpio_num_t door_gpios[] = {
+	ROOM1_DOOR_GPIO, ROOM2_DOOR_GPIO, ENTRANCE_DOOR_GPIO
+};
+static const gpio_num_t light_gpios[] = {ROOM1_LIGHT_GPIO, ROOM2_LIGHT_GPIO};
+static const gpio_num_t pir_gpios[] = {ROOM1_PIR_GPIO, ROOM2_PIR_GPIO};
 static system_config_t config;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
-static int32_t local_occupancy;
-static TickType_t last_motion_tick;
-static bool motion_hold_active;
+static SemaphoreHandle_t config_mutex;
+static int32_t occupancy_by_zone[3];
+static TickType_t last_motion_tick[2];
+static bool motion_hold_active[2];
+static TickType_t door_release_tick[3];
 
-static esp_err_t rc522_write(uint8_t reg, uint8_t value)
+static esp_err_t rc522_write(spi_device_handle_t spi, uint8_t reg, uint8_t value)
 {
 	uint8_t tx[2] = {(uint8_t)((reg << 1) & 0x7E), value};
 	spi_transaction_t transaction = {
 		.length = sizeof(tx) * 8,
 		.tx_buffer = tx,
 	};
-	return spi_device_transmit(rfid_spi, &transaction);
+	return spi_device_transmit(spi, &transaction);
 }
 
-static esp_err_t rc522_read(uint8_t reg, uint8_t *value)
+static esp_err_t rc522_read(spi_device_handle_t spi, uint8_t reg, uint8_t *value)
 {
 	uint8_t tx[2] = {(uint8_t)(((reg << 1) & 0x7E) | 0x80), 0};
 	uint8_t rx[2] = {0};
@@ -103,37 +107,37 @@ static esp_err_t rc522_read(uint8_t reg, uint8_t *value)
 		.tx_buffer = tx,
 		.rx_buffer = rx,
 	};
-	esp_err_t result = spi_device_transmit(rfid_spi, &transaction);
+	esp_err_t result = spi_device_transmit(spi, &transaction);
 	if (result == ESP_OK) {
 		*value = rx[1];
 	}
 	return result;
 }
 
-static bool rc522_transceive(const uint8_t *send_data, size_t send_length,
+static bool rc522_transceive(spi_device_handle_t spi, const uint8_t *send_data, size_t send_length,
 							 uint8_t *receive_data, size_t *receive_length,
 							 uint8_t *last_bits)
 {
 	uint8_t value;
-	if (rc522_write(RC522_COM_IRQ_REG, 0x7F) != ESP_OK ||
-		rc522_write(RC522_FIFO_LEVEL_REG, 0x80) != ESP_OK ||
-		rc522_write(RC522_COMMAND_REG, 0x00) != ESP_OK) {
+	if (rc522_write(spi, RC522_COM_IRQ_REG, 0x7F) != ESP_OK ||
+		rc522_write(spi, RC522_FIFO_LEVEL_REG, 0x80) != ESP_OK ||
+		rc522_write(spi, RC522_COMMAND_REG, 0x00) != ESP_OK) {
 		return false;
 	}
 	for (size_t index = 0; index < send_length; ++index) {
-		if (rc522_write(RC522_FIFO_DATA_REG, send_data[index]) != ESP_OK) {
+		if (rc522_write(spi, RC522_FIFO_DATA_REG, send_data[index]) != ESP_OK) {
 			return false;
 		}
 	}
-	if (rc522_write(RC522_COMMAND_REG, RC522_TRANSCEIVE) != ESP_OK ||
-		rc522_write(RC522_BIT_FRAMING_REG, 0x80) != ESP_OK) {
+	if (rc522_write(spi, RC522_COMMAND_REG, RC522_TRANSCEIVE) != ESP_OK ||
+		rc522_write(spi, RC522_BIT_FRAMING_REG, 0x80) != ESP_OK) {
 		return false;
 	}
 
 	bool completed = false;
 	for (unsigned attempt = 0; attempt < 30; ++attempt) {
 		vTaskDelay(pdMS_TO_TICKS(1));
-		if (rc522_read(RC522_COM_IRQ_REG, &value) != ESP_OK) {
+		if (rc522_read(spi, RC522_COM_IRQ_REG, &value) != ESP_OK) {
 			return false;
 		}
 		if ((value & 0x30) != 0) {
@@ -144,10 +148,10 @@ static bool rc522_transceive(const uint8_t *send_data, size_t send_length,
 			break;
 		}
 	}
-	rc522_write(RC522_BIT_FRAMING_REG, 0x00);
-	if (!completed || rc522_read(RC522_ERROR_REG, &value) != ESP_OK ||
+	rc522_write(spi, RC522_BIT_FRAMING_REG, 0x00);
+	if (!completed || rc522_read(spi, RC522_ERROR_REG, &value) != ESP_OK ||
 		(value & 0x1B) != 0 ||
-		rc522_read(RC522_FIFO_LEVEL_REG, &value) != ESP_OK || value == 0) {
+		rc522_read(spi, RC522_FIFO_LEVEL_REG, &value) != ESP_OK || value == 0) {
 		return false;
 	}
 
@@ -156,32 +160,32 @@ static bool rc522_transceive(const uint8_t *send_data, size_t send_length,
 		return false;
 	}
 	for (size_t index = 0; index < available; ++index) {
-		if (rc522_read(RC522_FIFO_DATA_REG, &receive_data[index]) != ESP_OK) {
+		if (rc522_read(spi, RC522_FIFO_DATA_REG, &receive_data[index]) != ESP_OK) {
 			return false;
 		}
 	}
 	*receive_length = available;
-	if (last_bits != NULL && rc522_read(RC522_CONTROL_REG, &value) == ESP_OK) {
+	if (last_bits != NULL && rc522_read(spi, RC522_CONTROL_REG, &value) == ESP_OK) {
 		*last_bits = value & 0x07;
 	}
 	return true;
 }
 
-static bool rc522_read_uid(uint8_t uid[4])
+static bool rc522_read_uid(spi_device_handle_t spi, uint8_t uid[4])
 {
 	const uint8_t request[] = {0x26};
 	uint8_t response[5];
 	size_t response_length = sizeof(response);
 	uint8_t last_bits = 0;
-	if (rc522_write(RC522_BIT_FRAMING_REG, 0x07) != ESP_OK ||
-		!rc522_transceive(request, sizeof(request), response, &response_length,
+	if (rc522_write(spi, RC522_BIT_FRAMING_REG, 0x07) != ESP_OK ||
+		!rc522_transceive(spi, request, sizeof(request), response, &response_length,
 						  &last_bits) || response_length != 2 || last_bits != 0) {
 		return false;
 	}
 
 	const uint8_t anticollision[] = {0x93, 0x20};
 	response_length = sizeof(response);
-	if (!rc522_transceive(anticollision, sizeof(anticollision), response,
+	if (!rc522_transceive(spi, anticollision, sizeof(anticollision), response,
 						  &response_length, NULL) || response_length != 5 ||
 		(uint8_t)(response[0] ^ response[1] ^ response[2] ^ response[3]) != response[4]) {
 		return false;
@@ -190,34 +194,33 @@ static bool rc522_read_uid(uint8_t uid[4])
 	return true;
 }
 
-static void rc522_init(void)
+static void rc522_init(access_terminal_t *terminal)
 {
-	gpio_config_t reset_gpio = {
-		.pin_bit_mask = 1ULL << SMART_SYSTEM_PIN_RFID_RST,
-		.mode = GPIO_MODE_OUTPUT,
-	};
-	ESP_ERROR_CHECK(gpio_config(&reset_gpio));
-	gpio_set_level(SMART_SYSTEM_PIN_RFID_RST, 0);
-	vTaskDelay(pdMS_TO_TICKS(20));
-	gpio_set_level(SMART_SYSTEM_PIN_RFID_RST, 1);
+	spi_device_handle_t spi = terminal->spi;
+	ESP_ERROR_CHECK(rc522_write(spi, RC522_COMMAND_REG, RC522_SOFT_RESET));
 	vTaskDelay(pdMS_TO_TICKS(50));
-
-	ESP_ERROR_CHECK(rc522_write(RC522_COMMAND_REG, RC522_SOFT_RESET));
-	vTaskDelay(pdMS_TO_TICKS(50));
-	ESP_ERROR_CHECK(rc522_write(0x2A, 0x8D));
-	ESP_ERROR_CHECK(rc522_write(0x2B, 0x3E));
-	ESP_ERROR_CHECK(rc522_write(0x2D, 30));
-	ESP_ERROR_CHECK(rc522_write(0x2C, 0));
-	ESP_ERROR_CHECK(rc522_write(RC522_TX_ASK_REG, 0x40));
-	ESP_ERROR_CHECK(rc522_write(RC522_MODE_REG, 0x3D));
+	ESP_ERROR_CHECK(rc522_write(spi, 0x2A, 0x8D));
+	ESP_ERROR_CHECK(rc522_write(spi, 0x2B, 0x3E));
+	ESP_ERROR_CHECK(rc522_write(spi, 0x2D, 30));
+	ESP_ERROR_CHECK(rc522_write(spi, 0x2C, 0));
+	ESP_ERROR_CHECK(rc522_write(spi, RC522_TX_ASK_REG, 0x40));
+	ESP_ERROR_CHECK(rc522_write(spi, RC522_MODE_REG, 0x3D));
 	uint8_t tx_control;
-	ESP_ERROR_CHECK(rc522_read(RC522_TX_CONTROL_REG, &tx_control));
+	ESP_ERROR_CHECK(rc522_read(spi, RC522_TX_CONTROL_REG, &tx_control));
 	if ((tx_control & 0x03) != 0x03) {
-		ESP_ERROR_CHECK(rc522_write(RC522_TX_CONTROL_REG, tx_control | 0x03));
+		ESP_ERROR_CHECK(rc522_write(spi, RC522_TX_CONTROL_REG, tx_control | 0x03));
 	}
 	uint8_t version;
-	ESP_ERROR_CHECK(rc522_read(RC522_VERSION_REG, &version));
-	ESP_LOGI(TAG, "MFRC522 version register: 0x%02X", version);
+	ESP_ERROR_CHECK(rc522_read(spi, RC522_VERSION_REG, &version));
+	if (version == 0x00 || version == 0xFF) {
+		ESP_LOGW(TAG,
+				 "%s RFID returned 0x%02X; check shared SPI, CS GPIO %d, and reset GPIO %d",
+				 terminal->profile.name, version, terminal->chip_select_gpio,
+				 RFID_RESET_GPIO);
+	} else {
+		ESP_LOGI(TAG, "%s RFID version register: 0x%02X",
+				 terminal->profile.name, version);
+	}
 }
 
 static bool access_window_open(void)
@@ -231,82 +234,92 @@ static bool access_window_open(void)
 		return false;
 	}
 	uint16_t minute = (uint16_t)(local_time.tm_hour * 60 + local_time.tm_min);
-	return minute >= config.schedule_start_minute &&
-		   minute < config.schedule_end_minute;
+	xSemaphoreTake(config_mutex, portMAX_DELAY);
+	uint16_t schedule_start = config.schedule_start_minute;
+	uint16_t schedule_end = config.schedule_end_minute;
+	xSemaphoreGive(config_mutex);
+	return minute >= schedule_start && minute < schedule_end;
 }
 
 static bool uid_is_allowed(const uint8_t uid[4])
 {
+	bool allowed = false;
+	xSemaphoreTake(config_mutex, portMAX_DELAY);
 	for (uint8_t index = 0; index < config.allowed_count; ++index) {
 		if (memcmp(uid, config.allowed_uids[index], 4) == 0) {
-			return true;
+			allowed = true;
+			break;
 		}
 	}
-	return false;
+	xSemaphoreGive(config_mutex);
+	return allowed;
 }
 
-static int32_t get_global_occupancy(void)
+static int32_t get_zone_occupancy(uint8_t room_id)
 {
-	int32_t total;
+	if (room_id > 2) {
+		return 0;
+	}
+	int32_t occupancy;
 	portENTER_CRITICAL(&state_lock);
-	total = local_occupancy;
+	occupancy = occupancy_by_zone[room_id];
 	portEXIT_CRITICAL(&state_lock);
-	return communication_get_global_occupancy(active_profile->room_id, total);
+	return occupancy > 0 ? occupancy : 0;
 }
 
 static void update_lighting(void)
 {
-	if (active_profile->room_id != 0) {
-		TickType_t now = xTaskGetTickCount();
-		bool motion_detected = gpio_get_level(SMART_SYSTEM_PIN_PIR) != 0;
+	TickType_t now = xTaskGetTickCount();
+	for (size_t room = 0; room < 2; ++room) {
+		bool motion_detected = gpio_get_level(pir_gpios[room]) != 0;
 		if (motion_detected) {
-			last_motion_tick = now;
-			motion_hold_active = true;
-		} else if (motion_hold_active &&
-				   (TickType_t)(now - last_motion_tick) >=
+			last_motion_tick[room] = now;
+			motion_hold_active[room] = true;
+		} else if (motion_hold_active[room] &&
+				   (TickType_t)(now - last_motion_tick[room]) >=
 					   pdMS_TO_TICKS(PIR_LIGHT_HOLD_MS)) {
-			motion_hold_active = false;
+			motion_hold_active[room] = false;
 		}
-		gpio_set_level(SMART_SYSTEM_PIN_LIGHT_RELAY, motion_hold_active ? 1 : 0);
-		return;
+		gpio_set_level(light_gpios[room], motion_hold_active[room] ? 1 : 0);
 	}
-	gpio_set_level(SMART_SYSTEM_PIN_LIGHT_RELAY, get_global_occupancy() > 0 ? 1 : 0);
 }
 
-static void handle_card(const uint8_t uid[4])
+static void handle_card(const access_terminal_t *terminal, const uint8_t uid[4])
 {
 	bool allowed = uid_is_allowed(uid);
 	if (!allowed) {
-		storage_write_event(active_profile, "DENIED", uid, "unknown-card");
+		storage_write_event(&terminal->profile, "DENIED", uid, "unknown-card");
 		return;
 	}
-	if (!access_window_open()) {
-		storage_write_event(active_profile, "DENIED", uid,
+	if (!terminal->profile.exit_node && !access_window_open()) {
+		storage_write_event(&terminal->profile, "DENIED", uid,
 						"outside-schedule-or-clock-unset");
 		return;
 	}
 
-	gpio_set_level(SMART_SYSTEM_PIN_DOOR_RELAY, 1);
-	vTaskDelay(pdMS_TO_TICKS(700));
-	gpio_set_level(SMART_SYSTEM_PIN_DOOR_RELAY, 0);
+	gpio_num_t door_gpio = door_gpios[terminal->profile.room_id];
+	gpio_set_level(door_gpio, 1);
+	door_release_tick[terminal->profile.room_id] =
+		xTaskGetTickCount() + pdMS_TO_TICKS(700);
 
 	portENTER_CRITICAL(&state_lock);
-	if (active_profile->exit_node) {
-		--local_occupancy;
+	if (terminal->profile.exit_node) {
+		if (occupancy_by_zone[terminal->profile.room_id] > 0) {
+			--occupancy_by_zone[terminal->profile.room_id];
+		}
 	} else {
-		++local_occupancy;
+		++occupancy_by_zone[terminal->profile.room_id];
 	}
-	int32_t occupancy = local_occupancy;
+	int32_t occupancy = occupancy_by_zone[terminal->profile.room_id];
 	portEXIT_CRITICAL(&state_lock);
-	storage_save_occupancy(occupancy);
+	storage_save_occupancy(terminal->profile.room_id, occupancy);
 	update_lighting();
-	storage_write_event(active_profile, active_profile->exit_node ? "EXIT" : "ENTRY", uid,
-					active_profile->exit_node ? "occupancy-decremented" :
+	storage_write_event(&terminal->profile,
+					terminal->profile.exit_node ? "EXIT" : "ENTRY", uid,
+					terminal->profile.exit_node ? "occupancy-decremented" :
 												"occupancy-incremented");
-	ESP_LOGI(TAG, "%s (room %u): local contribution %" PRId32
-			 "; room occupancy %" PRId32,
-			 active_profile->name, (unsigned)active_profile->room_id, occupancy,
-			 get_global_occupancy());
+	ESP_LOGI(TAG, "%s accepted; estimated occupancy for zone %u: %" PRId32,
+			 terminal->profile.name, (unsigned)terminal->profile.room_id, occupancy);
 }
 
 static bool parse_uid(const char *text, uint8_t uid[4])
@@ -347,15 +360,20 @@ static void print_help(void)
 
 static void print_status(void)
 {
-	printf("Room: %s (ID %u) | terminal: %s | local contribution: %" PRId32
-		   " | room occupancy: %" PRId32 "\n",
-		   active_profile->name, (unsigned)active_profile->room_id,
-		   active_profile->exit_node ? "exit" : "entry", local_occupancy,
-		   get_global_occupancy());
+	uint8_t allowed_count;
+	uint16_t schedule_start;
+	uint16_t schedule_end;
+	xSemaphoreTake(config_mutex, portMAX_DELAY);
+	allowed_count = config.allowed_count;
+	schedule_start = config.schedule_start_minute;
+	schedule_end = config.schedule_end_minute;
+	xSemaphoreGive(config_mutex);
+	printf("Central controller | estimated occupancy: Room 1=%" PRId32
+		   ", Room 2=%" PRId32 ", entrance=%" PRId32 "\n",
+		   get_zone_occupancy(1), get_zone_occupancy(2), get_zone_occupancy(0));
 	printf("Allowed cards: %u | schedule: %02u:%02u-%02u:%02u | clock: ",
-		   config.allowed_count, config.schedule_start_minute / 60,
-		   config.schedule_start_minute % 60, config.schedule_end_minute / 60,
-		   config.schedule_end_minute % 60);
+		   allowed_count, schedule_start / 60, schedule_start % 60,
+		   schedule_end / 60, schedule_end % 60);
 	time_t now = time(NULL);
 	if (now < 1760000000) {
 		printf("not set\n");
@@ -366,11 +384,12 @@ static void print_status(void)
 		strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &local_time);
 		printf("%s\n", timestamp);
 	}
-	if (active_profile->room_id != 0) {
-		printf("Room light: %s | PIR: %s\n",
-			   gpio_get_level(SMART_SYSTEM_PIN_LIGHT_RELAY) ? "ON" : "OFF",
-			   gpio_get_level(SMART_SYSTEM_PIN_PIR) ? "motion" : "clear");
-	}
+	printf("Room 1 light: %s | PIR: %s\n",
+		   gpio_get_level(ROOM1_LIGHT_GPIO) ? "ON" : "OFF",
+		   gpio_get_level(ROOM1_PIR_GPIO) ? "motion" : "clear");
+	printf("Room 2 light: %s | PIR: %s\n",
+		   gpio_get_level(ROOM2_LIGHT_GPIO) ? "ON" : "OFF",
+		   gpio_get_level(ROOM2_PIR_GPIO) ? "motion" : "clear");
 }
 
 static void print_logs(void)
@@ -382,15 +401,20 @@ static void console_task(void *argument)
 {
 	char line[128];
 	bool authenticated = false;
+	bool prompt_pending = true;
 	(void)argument;
 	print_help();
 	while (true) {
-		printf("smart> ");
-		fflush(stdout);
+		if (prompt_pending) {
+			printf("smart> ");
+			fflush(stdout);
+			prompt_pending = false;
+		}
 		if (fgets(line, sizeof(line), stdin) == NULL) {
-			vTaskDelay(pdMS_TO_TICKS(100));
+			vTaskDelay(pdMS_TO_TICKS(1000));
 			continue;
 		}
+		prompt_pending = true;
 		line[strcspn(line, "\r\n")] = '\0';
 		char *command = strtok(line, " \t");
 		char *argument_one = strtok(NULL, " \t");
@@ -406,7 +430,13 @@ static void console_task(void *argument)
 		} else if (strcmp(command, "logs") == 0) {
 			print_logs();
 		} else if (strcmp(command, "login") == 0) {
-			if (argument_one != NULL && strcmp(argument_one, config.admin_pin) == 0) {
+			bool pin_matches = false;
+			if (argument_one != NULL) {
+				xSemaphoreTake(config_mutex, portMAX_DELAY);
+				pin_matches = strcmp(argument_one, config.admin_pin) == 0;
+				xSemaphoreGive(config_mutex);
+			}
+			if (pin_matches) {
 				authenticated = true;
 				printf("Administrator session enabled.\n");
 			} else {
@@ -429,6 +459,7 @@ static void console_task(void *argument)
 					printf("Use an 8-digit hexadecimal UID.\n");
 					continue;
 				}
+				xSemaphoreTake(config_mutex, portMAX_DELAY);
 				int found = -1;
 				for (uint8_t index = 0; index < config.allowed_count; ++index) {
 					if (memcmp(uid, config.allowed_uids[index], 4) == 0) {
@@ -446,6 +477,7 @@ static void console_task(void *argument)
 					memset(config.allowed_uids[config.allowed_count], 0, 4);
 				}
 				storage_save_config(&config);
+				xSemaphoreGive(config_mutex);
 				printf("Allowlist updated (%u cards).\n", config.allowed_count);
 			} else if (strcmp(command, "schedule") == 0) {
 				uint16_t start;
@@ -455,9 +487,11 @@ static void console_task(void *argument)
 					printf("Schedule must be a same-day range, e.g. 07:00 22:00.\n");
 					continue;
 				}
+				xSemaphoreTake(config_mutex, portMAX_DELAY);
 				config.schedule_start_minute = start;
 				config.schedule_end_minute = end;
 				storage_save_config(&config);
+				xSemaphoreGive(config_mutex);
 				printf("Schedule saved.\n");
 			} else if (strcmp(command, "time") == 0) {
 				int year, month, day, hour, minute, second;
@@ -492,8 +526,10 @@ static void console_task(void *argument)
 					}
 				}
 				if (argument_one != NULL) {
+					xSemaphoreTake(config_mutex, portMAX_DELAY);
 					strcpy(config.admin_pin, argument_one);
 					storage_save_config(&config);
+					xSemaphoreGive(config_mutex);
 					printf("Administrator PIN changed.\n");
 				}
 			}
@@ -505,74 +541,96 @@ static void console_task(void *argument)
 
 void app_main(void)
 {
-	storage_init();
-	storage_load_config(&config);
-	storage_load_occupancy(&local_occupancy);
-
-	gpio_config_t output_gpio = {
-		.pin_bit_mask = (1ULL << SMART_SYSTEM_PIN_DOOR_RELAY) |
-						(1ULL << SMART_SYSTEM_PIN_LIGHT_RELAY),
-		.mode = GPIO_MODE_OUTPUT,
-	};
-	ESP_ERROR_CHECK(gpio_config(&output_gpio));
-	gpio_set_level(SMART_SYSTEM_PIN_DOOR_RELAY, 0);
-	gpio_set_level(SMART_SYSTEM_PIN_LIGHT_RELAY, 0);
-	if (active_profile->room_id != 0) {
-		gpio_config_t presence_gpio = {
-			.pin_bit_mask = 1ULL << SMART_SYSTEM_PIN_PIR,
-			.mode = GPIO_MODE_INPUT,
-			.pull_down_en = GPIO_PULLDOWN_ENABLE,
-		};
-		ESP_ERROR_CHECK(gpio_config(&presence_gpio));
-	}
-
 	spi_bus_config_t bus_config = {
 		.sclk_io_num = SMART_SYSTEM_PIN_SCK,
 		.mosi_io_num = SMART_SYSTEM_PIN_MOSI,
 		.miso_io_num = SMART_SYSTEM_PIN_MISO,
 		.quadwp_io_num = -1,
 		.quadhd_io_num = -1,
-		.max_transfer_sz = 16,
+		.max_transfer_sz = 4000,
 	};
 	ESP_ERROR_CHECK(spi_bus_initialize(SMART_SYSTEM_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO));
+	storage_init(SMART_SYSTEM_SPI_HOST);
+	storage_load_config(&config);
+	config_mutex = xSemaphoreCreateMutex();
+	ESP_ERROR_CHECK(config_mutex == NULL ? ESP_ERR_NO_MEM : ESP_OK);
+	for (uint8_t zone = 0; zone < 3; ++zone) {
+		storage_load_occupancy(zone, &occupancy_by_zone[zone]);
+	}
+
+	uint64_t output_mask = 1ULL << RFID_RESET_GPIO;
+	for (size_t index = 0; index < 3; ++index) {
+		output_mask |= 1ULL << door_gpios[index];
+	}
+	for (size_t index = 0; index < 2; ++index) {
+		output_mask |= 1ULL << light_gpios[index];
+	}
+	gpio_config_t output_gpio = {
+		.pin_bit_mask = output_mask,
+		.mode = GPIO_MODE_OUTPUT,
+	};
+	ESP_ERROR_CHECK(gpio_config(&output_gpio));
+	for (size_t index = 0; index < 3; ++index) {
+		gpio_set_level(door_gpios[index], 0);
+	}
+	for (size_t index = 0; index < 2; ++index) {
+		gpio_set_level(light_gpios[index], 0);
+	}
+	gpio_set_level(RFID_RESET_GPIO, 0);
+	vTaskDelay(pdMS_TO_TICKS(50));
+	gpio_set_level(RFID_RESET_GPIO, 1);
+	vTaskDelay(pdMS_TO_TICKS(50));
+
+	gpio_config_t presence_gpio = {
+		.pin_bit_mask = (1ULL << ROOM1_PIR_GPIO) | (1ULL << ROOM2_PIR_GPIO),
+		.mode = GPIO_MODE_INPUT,
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+	};
+	ESP_ERROR_CHECK(gpio_config(&presence_gpio));
+
 	spi_device_interface_config_t device_config = {
 		.clock_speed_hz = RFID_SPI_CLOCK_HZ,
 		.mode = 0,
-		.spics_io_num = SMART_SYSTEM_PIN_RFID_CS,
+		.spics_io_num = -1,
 		.queue_size = 1,
 	};
-	ESP_ERROR_CHECK(spi_bus_add_device(SMART_SYSTEM_SPI_HOST, &device_config, &rfid_spi));
-	rc522_init();
-	ESP_ERROR_CHECK(communication_init(active_profile->room_id));
+	for (size_t index = 0; index < TERMINAL_COUNT; ++index) {
+		device_config.spics_io_num = terminals[index].chip_select_gpio;
+		ESP_ERROR_CHECK(spi_bus_add_device(SMART_SYSTEM_SPI_HOST, &device_config,
+											 &terminals[index].spi));
+		rc522_init(&terminals[index]);
+	}
 
 	ESP_ERROR_CHECK(xTaskCreate(console_task, "serial_console", 4096, NULL, 5, NULL) == pdPASS
 						? ESP_OK
 						: ESP_FAIL);
-	ESP_LOGI(TAG, "Terminal ready: room %u (%s), %s; default admin PIN is 1234",
-			 (unsigned)active_profile->room_id, active_profile->name,
-			 active_profile->exit_node ? "exit" : "entry");
+	ESP_LOGI(TAG, "Central controller ready: 6 RFID endpoints, 3 access zones, 2 room lights");
 
-	uint8_t last_uid[4] = {0};
-	TickType_t last_card_tick = 0;
-	TickType_t last_broadcast_tick = 0;
+	uint8_t last_uid[TERMINAL_COUNT][4] = {{0}};
+	TickType_t last_card_tick[TERMINAL_COUNT] = {0};
 	while (true) {
-		uint8_t uid[4];
 		TickType_t now = xTaskGetTickCount();
-		if (rc522_read_uid(uid)) {
-			if (memcmp(uid, last_uid, sizeof(uid)) != 0 ||
-				(TickType_t)(now - last_card_tick) > pdMS_TO_TICKS(2500)) {
-				memcpy(last_uid, uid, sizeof(last_uid));
-				last_card_tick = now;
-				handle_card(uid);
+		for (size_t index = 0; index < TERMINAL_COUNT; ++index) {
+			uint8_t uid[4];
+			if (rc522_read_uid(terminals[index].spi, uid)) {
+				if (memcmp(uid, last_uid[index], sizeof(uid)) != 0 ||
+					(TickType_t)(now - last_card_tick[index]) > pdMS_TO_TICKS(2500)) {
+					memcpy(last_uid[index], uid, sizeof(uid));
+					last_card_tick[index] = now;
+					handle_card(&terminals[index], uid);
+				}
+			} else if ((TickType_t)(now - last_card_tick[index]) > pdMS_TO_TICKS(500)) {
+				memset(last_uid[index], 0, sizeof(last_uid[index]));
 			}
-		} else if ((TickType_t)(now - last_card_tick) > pdMS_TO_TICKS(500)) {
-			memset(last_uid, 0, sizeof(last_uid));
 		}
-		if ((TickType_t)(now - last_broadcast_tick) >= pdMS_TO_TICKS(1000)) {
-			communication_broadcast_occupancy(active_profile->room_id, local_occupancy);
-			last_broadcast_tick = now;
+		for (size_t zone = 0; zone < 3; ++zone) {
+			if (door_release_tick[zone] != 0 &&
+				(int32_t)(now - door_release_tick[zone]) >= 0) {
+				gpio_set_level(door_gpios[zone], 0);
+				door_release_tick[zone] = 0;
+			}
 		}
 		update_lighting();
-		vTaskDelay(pdMS_TO_TICKS(50));
+		vTaskDelay(pdMS_TO_TICKS(20));
 	}
 }
