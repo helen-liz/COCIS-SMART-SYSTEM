@@ -11,14 +11,14 @@
       "attrs": { "env": "esp-idf" }
     },
     {
-      "type": "wokwi-rc522",
+      "type": "board-mfrc522",
       "id": "rfid_entry",
       "top": 45,
       "left": 360,
       "attrs": {}
     },
     {
-      "type": "wokwi-rc522",
+      "type": "board-mfrc522",
       "id": "rfid_exit",
       "top": 175,
       "left": 360,
@@ -32,11 +32,11 @@
       "attrs": {}
     },
     {
-      "type": "wokwi-ssd1306",
+      "type": "board-ssd1306",
       "id": "oled",
       "top": 45,
       "left": 830,
-      "attrs": {}
+      "attrs": { "i2cAddress": "0x3c" }
     },
     {
       "type": "wokwi-relay-module",
@@ -106,52 +106,52 @@
     }
   ],
   "connections": [
-    [ "esp:18", "rfid_entry:SCK", "green", [] ],
-    [ "esp:23", "rfid_entry:MOSI", "green", [] ],
-    [ "esp:19", "rfid_entry:MISO", "green", [] ],
-    [ "esp:5", "rfid_entry:SDA", "green", [] ],
-    [ "esp:22", "rfid_entry:RST", "green", [] ],
+    [ "esp:D18", "rfid_entry:SCK", "green", [] ],
+    [ "esp:D23", "rfid_entry:MOSI", "green", [] ],
+    [ "esp:D19", "rfid_entry:MISO", "green", [] ],
+    [ "esp:D5", "rfid_entry:SDA", "green", [] ],
+    [ "esp:D22", "rfid_entry:RST", "green", [] ],
     [ "esp:3V3", "rfid_entry:3.3V", "red", [] ],
     [ "esp:GND.1", "rfid_entry:GND", "black", [] ],
 
-    [ "esp:18", "rfid_exit:SCK", "green", [] ],
-    [ "esp:23", "rfid_exit:MOSI", "green", [] ],
-    [ "esp:19", "rfid_exit:MISO", "green", [] ],
-    [ "esp:4", "rfid_exit:SDA", "green", [] ],
-    [ "esp:13", "rfid_exit:RST", "green", [] ],
+    [ "esp:D18", "rfid_exit:SCK", "green", [] ],
+    [ "esp:D23", "rfid_exit:MOSI", "green", [] ],
+    [ "esp:D19", "rfid_exit:MISO", "green", [] ],
+    [ "esp:D4", "rfid_exit:SDA", "green", [] ],
+    [ "esp:D13", "rfid_exit:RST", "green", [] ],
     [ "esp:3V3", "rfid_exit:3.3V", "red", [] ],
     [ "esp:GND.2", "rfid_exit:GND", "black", [] ],
 
-    [ "esp:21", "oled:SDA", "blue", [] ],
-    [ "esp:25", "oled:SCL", "yellow", [] ],
+    [ "esp:D21", "oled:SDA", "blue", [] ],
+    [ "esp:D25", "oled:SCL", "yellow", [] ],
     [ "esp:3V3", "oled:VCC", "red", [] ],
     [ "esp:GND.1", "oled:GND", "black", [] ],
 
-    [ "esp:5V", "room_pir:VCC", "red", [] ],
-    [ "esp:32", "room_pir:OUT", "green", [] ],
+    [ "esp:VIN", "room_pir:VCC", "red", [] ],
+    [ "esp:D32", "room_pir:OUT", "green", [] ],
     [ "esp:GND.1", "room_pir:GND", "black", [] ],
 
-    [ "esp:26", "door_relay:IN", "blue", [] ],
-    [ "esp:27", "light_relay:IN", "blue", [] ],
-    [ "esp:33", "exit_door_relay:IN", "blue", [] ],
-    [ "esp:5V", "door_relay:VCC", "red", [] ],
-    [ "esp:5V", "light_relay:VCC", "red", [] ],
-    [ "esp:5V", "exit_door_relay:VCC", "red", [] ],
+    [ "esp:D26", "door_relay:IN", "blue", [] ],
+    [ "esp:D27", "light_relay:IN", "blue", [] ],
+    [ "esp:D33", "exit_door_relay:IN", "blue", [] ],
+    [ "esp:VIN", "door_relay:VCC", "red", [] ],
+    [ "esp:VIN", "light_relay:VCC", "red", [] ],
+    [ "esp:VIN", "exit_door_relay:VCC", "red", [] ],
     [ "esp:GND.2", "door_relay:GND", "black", [] ],
     [ "esp:GND.2", "light_relay:GND", "black", [] ],
     [ "esp:GND.2", "exit_door_relay:GND", "black", [] ],
 
-    [ "esp:5V", "door_relay:COM", "red", [] ],
+    [ "esp:VIN", "door_relay:COM", "red", [] ],
     [ "door_relay:NO", "door_load_resistor:1", "orange", [] ],
     [ "door_load_resistor:2", "door_indicator:A", "orange", [] ],
     [ "door_indicator:C", "esp:GND.2", "black", [] ],
 
-    [ "esp:5V", "light_relay:COM", "red", [] ],
+    [ "esp:VIN", "light_relay:COM", "red", [] ],
     [ "light_relay:NO", "light_load_resistor:1", "orange", [] ],
     [ "light_load_resistor:2", "room_light:A", "orange", [] ],
     [ "room_light:C", "esp:GND.2", "black", [] ],
 
-    [ "esp:5V", "exit_door_relay:COM", "red", [] ],
+    [ "esp:VIN", "exit_door_relay:COM", "red", [] ],
     [ "exit_door_relay:NO", "exit_load_resistor:1", "orange", [] ],
     [ "exit_load_resistor:2", "exit_indicator:A", "orange", [] ],
     [ "exit_indicator:C", "esp:GND.2", "black", [] ]

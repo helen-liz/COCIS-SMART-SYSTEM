@@ -25,4 +25,6 @@ if errorlevel 1 exit /b %errorlevel%
 copy /Y build-entrance\Smart-System.elf build\entrance.elf >nul
 copy /Y build-entrance\Smart-System.bin build\entrance.bin >nul
 copy /Y build-entrance\merged-binary.bin build\entrance-wokwi.bin >nul
+copy /Y build-entrance\merged-binary.bin build\wokwi-firmware.bin >nul
+copy /Y build-entrance\flasher_args.json build\flasher_args.json >nul
 echo Main entrance firmware built in build\entrance.elf and build\entrance.bin.

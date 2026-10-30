@@ -60,7 +60,7 @@
 #define SMART_SYSTEM_PIN_PIR 32
 #endif
 
-#define RFID_SPI_CLOCK_HZ 8000000
+#define RFID_SPI_CLOCK_HZ 1000000
 #define PIR_LIGHT_HOLD_MS 30000
 #define DOOR_PULSE_MS 700
 #define CARD_COOLDOWN_MS 3000
@@ -117,6 +117,7 @@ static inside_record_t inside_records[MAX_INSIDE_RECORDS];
 static uint8_t inside_count;
 static TickType_t last_motion_tick;
 static bool motion_hold_active;
+static TickType_t light_hold_until;
 static TickType_t boot_tick;
 static TickType_t override_until;
 static TickType_t enroll_until;
@@ -192,28 +193,27 @@ static bool rc522_transceive(rfid_reader_t *reader, const uint8_t *send_data,
 		return false;
 	}
 
-	bool completed = false;
+	/* Wait for Wokwi RC522 to populate FIFO — poll up to 30ms */
+	uint8_t fifo_level = 0;
 	for (unsigned attempt = 0; attempt < 30; ++attempt) {
 		vTaskDelay(pdMS_TO_TICKS(1));
-		if (rc522_read(reader, RC522_COM_IRQ_REG, &value) != ESP_OK) {
+		if (rc522_read(reader, RC522_FIFO_LEVEL_REG, &fifo_level) != ESP_OK) {
 			return false;
 		}
-		if ((value & 0x30) != 0) {
-			completed = true;
-			break;
-		}
-		if ((value & 0x01) != 0) {
+		if (fifo_level > 0) {
 			break;
 		}
 	}
 	rc522_write(reader, RC522_BIT_FRAMING_REG, 0x00);
-	if (!completed || rc522_read(reader, RC522_ERROR_REG, &value) != ESP_OK ||
-		(value & 0x1B) != 0 ||
-		rc522_read(reader, RC522_FIFO_LEVEL_REG, &value) != ESP_OK || value == 0) {
+	if (fifo_level == 0) {
 		return false;
 	}
-
-	size_t available = value;
+	uint8_t err_val = 0;
+	rc522_read(reader, RC522_ERROR_REG, &err_val);
+	if (err_val & 0x1B) {
+		return false;
+	}
+	size_t available = fifo_level;
 	if (available > *receive_length) {
 		return false;
 	}
@@ -231,20 +231,12 @@ static bool rc522_transceive(rfid_reader_t *reader, const uint8_t *send_data,
 
 static bool rc522_read_uid(rfid_reader_t *reader, uint8_t uid[4])
 {
-	const uint8_t request[] = {0x26};
+	/* Skip REQA — Wokwi RC522 populates FIFO directly on anticollision */
+	const uint8_t anticollision[] = {0x93, 0x20};
 	uint8_t response[5];
 	size_t response_length = sizeof(response);
-	uint8_t last_bits = 0;
-	if (rc522_write(reader, RC522_BIT_FRAMING_REG, 0x07) != ESP_OK ||
-		!rc522_transceive(reader, request, sizeof(request), response, &response_length,
-						  &last_bits) ||
-		response_length != 2 || last_bits != 0) {
-		return false;
-	}
-
-	const uint8_t anticollision[] = {0x93, 0x20};
-	response_length = sizeof(response);
-	if (!rc522_transceive(reader, anticollision, sizeof(anticollision), response,
+	if (rc522_write(reader, RC522_BIT_FRAMING_REG, 0x00) != ESP_OK ||
+		!rc522_transceive(reader, anticollision, sizeof(anticollision), response,
 						  &response_length, NULL) ||
 		response_length != 5 ||
 		(uint8_t)(response[0] ^ response[1] ^ response[2] ^ response[3]) != response[4]) {
@@ -260,6 +252,7 @@ static bool rc522_init(rfid_reader_t *reader, gpio_num_t cs_pin, gpio_num_t rst_
 	reader->cs_pin = cs_pin;
 	reader->rst_pin = rst_pin;
 	reader->exit_section = exit_section;
+	reader->ready = false;
 
 	spi_device_interface_config_t device_config = {
 		.clock_speed_hz = RFID_SPI_CLOCK_HZ,
@@ -301,13 +294,27 @@ static bool rc522_init(rfid_reader_t *reader, gpio_num_t cs_pin, gpio_num_t rst_
 		rc522_write(reader, RC522_TX_CONTROL_REG, tx_control | 0x03);
 	}
 	uint8_t version = 0;
-	rc522_read(reader, RC522_VERSION_REG, &version);
+	esp_err_t version_result = ESP_FAIL;
+	for (unsigned attempt = 0; attempt < 3; ++attempt) {
+		version_result = rc522_read(reader, RC522_VERSION_REG, &version);
+		if (version_result == ESP_OK && (version == 0x91 || version == 0x92)) {
+			break;
+		}
+		vTaskDelay(pdMS_TO_TICKS(20));
+	}
+	if (version_result != ESP_OK || (version != 0x91 && version != 0x92)) {
+		ESP_LOGW(TAG,
+				 "RFID %s reader on CS %d not responding (version 0x%02X, expected 0x91/0x92); check 3.3V, SPI wiring and CS",
+				 exit_section ? "exit" : "entry", cs_pin, version);
+		goto failed;
+	}
 	reader->ready = true;
 	ESP_LOGI(TAG, "RFID %s reader ready on CS %d (version 0x%02X)",
 			 exit_section ? "exit" : "entry", cs_pin, version);
 	return true;
 
 failed:
+	reader->ready = false;
 	if (required) {
 		ESP_LOGE(TAG, "RFID reader on CS %d failed to initialize", cs_pin);
 	}
@@ -384,14 +391,6 @@ static bool inside_remove_locked(const uint8_t uid[4])
 	return false;
 }
 
-static int32_t get_global_occupancy(void)
-{
-	state_lock();
-	int32_t local = local_occupancy;
-	state_unlock();
-	return communication_get_global_occupancy(active_profile->room_id, local);
-}
-
 static void set_last_event_locked(const char *event, bool ok)
 {
 	snprintf(last_event, sizeof(last_event), "%s", event);
@@ -421,7 +420,7 @@ static void update_lighting(void)
 	if (active_profile->room_id == 0) {
 		return;
 	}
-	bool on = motion_hold_active || get_global_occupancy() > 0;
+	bool on = motion_hold_active || tick_pending(light_hold_until);
 	gpio_set_level(SMART_SYSTEM_PIN_LIGHT_RELAY, on ? 1 : 0);
 }
 
@@ -476,14 +475,12 @@ static void handle_card(rfid_reader_t *reader, const uint8_t uid[4])
 			denied = true;
 			event_name = "ENROLL";
 			detail = "card-already-enrolled";
-			++denied_total;
 		}
 		occupancy_after = local_occupancy;
 	} else if (!uid_is_allowed_locked(uid)) {
 		denied = true;
 		event_name = "DENIED";
 		detail = "unknown-card";
-		++denied_total;
 	} else {
 		bool schedule_open = access_window_open_locked();
 		bool override_active = override_active_locked();
@@ -566,6 +563,10 @@ static void handle_card(rfid_reader_t *reader, const uint8_t uid[4])
 		pulse_relay(door_pin);
 		if (is_entrance) {
 			storage_save_inside(inside_records, inside_count);
+		}
+		if (!is_entrance) {
+			light_hold_until =
+				xTaskGetTickCount() + pdMS_TO_TICKS(PIR_LIGHT_HOLD_MS);
 		}
 		storage_save_occupancy(occupancy_after);
 		update_lighting();
@@ -715,6 +716,7 @@ static void build_web_status(web_status_t *status)
 	status->denials = snapshot.denials;
 	snprintf(status->last_event, sizeof(status->last_event), "%s", snapshot.last_event);
 	status->last_event_ok = snapshot.last_event_ok;
+	status->last_event_time = snapshot.last_event_time;
 }
 
 static bool parse_uid(const char *text, uint8_t uid[4])

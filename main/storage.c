@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -6,16 +7,21 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_spiffs.h"
+#include "esp_vfs_fat.h"
+#include "driver/spi_master.h"
+#include "sdmmc_cmd.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "storage.h"
 
-#define ACCESS_LOG_PATH "/spiffs/events.csv"
+#define ACCESS_LOG_PATH  "/sdcard/events.csv"
+#define SD_CS_PIN        15
+#define SD_SPI_HOST      SPI2_HOST
 
 static const char *TAG = "smart_system_storage";
 static nvs_handle_t config_nvs;
-static bool spiffs_mounted;
+static bool sd_mounted;
+static sdmmc_card_t *sd_card;
 
 void storage_init(void)
 {
@@ -29,15 +35,24 @@ void storage_init(void)
 	}
 	ESP_ERROR_CHECK(nvs_open("smart_system", NVS_READWRITE, &config_nvs));
 
-	esp_vfs_spiffs_conf_t spiffs_config = {
-		.base_path = "/spiffs",
-		.partition_label = NULL,
-		.max_files = 4,
+	esp_vfs_fat_sdmmc_mount_config_t mount_config = {
 		.format_if_mount_failed = true,
+		.max_files = 4,
+		.allocation_unit_size = 16 * 1024,
 	};
-	spiffs_mounted = esp_vfs_spiffs_register(&spiffs_config) == ESP_OK;
-	if (!spiffs_mounted) {
-		ESP_LOGW(TAG, "SPIFFS unavailable; access events will be logged to serial only");
+	sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+	slot_config.gpio_cs = SD_CS_PIN;
+	slot_config.host_id = SD_SPI_HOST;
+	sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+	esp_err_t sd_result = esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_config,
+												   &mount_config, &sd_card);
+	if (sd_result != ESP_OK) {
+		ESP_LOGE(TAG, "SD card mount failed (%s); access events will be logged to serial only",
+				 esp_err_to_name(sd_result));
+	} else {
+		sd_mounted = true;
+		ESP_LOGI(TAG, "SD card ready (%lluMB)",
+				 ((uint64_t)sd_card->csd.capacity) * sd_card->csd.sector_size / (1024 * 1024));
 	}
 }
 
@@ -135,14 +150,27 @@ void storage_write_event(const room_profile_t *profile, const char *event,
 	}
 	bool new_file = access(ACCESS_LOG_PATH, F_OK) != 0;
 	FILE *log_file = fopen(ACCESS_LOG_PATH, "a");
-	if (log_file != NULL) {
-		if (new_file) {
-			fprintf(log_file, "timestamp,room_id,room,event,uid,detail\n");
-		}
-		fprintf(log_file, "%s,%u,%s,%s,%s,%s\n", timestamp,
-				(unsigned)profile->room_id, profile->name, event, uid_text, detail);
-		fclose(log_file);
+	if (log_file == NULL) {
+		ESP_LOGE(TAG, "Unable to open %s for append: %s", ACCESS_LOG_PATH,
+				 strerror(errno));
+		return;
 	}
+	if (new_file &&
+		fprintf(log_file, "timestamp,room_id,room,event,uid,detail\n") < 0) {
+		ESP_LOGE(TAG, "Unable to write CSV header: %s", strerror(errno));
+		fclose(log_file);
+		return;
+	}
+	if (fprintf(log_file, "%s,%u,%s,%s,%s,%s\n", timestamp,
+				(unsigned)profile->room_id, profile->name, event, uid_text, detail) < 0) {
+		ESP_LOGE(TAG, "Unable to write access event: %s", strerror(errno));
+		fclose(log_file);
+		return;
+	}
+	if (fflush(log_file) != 0 || fsync(fileno(log_file)) != 0) {
+		ESP_LOGE(TAG, "Unable to flush access event: %s", strerror(errno));
+	}
+	fclose(log_file);
 }
 
 void storage_print_logs(void)
@@ -176,7 +204,41 @@ size_t storage_read_logs(char *buffer, size_t max_size)
 	if (log_file == NULL) {
 		return 0;
 	}
+	if (fseek(log_file, 0, SEEK_END) != 0) {
+		fclose(log_file);
+		return 0;
+	}
+	long file_size = ftell(log_file);
+	if (file_size <= 0) {
+		fclose(log_file);
+		return 0;
+	}
 	size_t total = 0;
+	size_t capacity = max_size - 1;
+	if ((size_t)file_size > capacity) {
+		if (fseek(log_file, 0, SEEK_SET) != 0 ||
+			fgets(buffer, (int)max_size, log_file) == NULL) {
+			fclose(log_file);
+			return 0;
+		}
+		total = strlen(buffer);
+		size_t tail_capacity = capacity - total;
+		long start = file_size - (long)tail_capacity;
+		if (start < 0) {
+			start = 0;
+		}
+		if (fseek(log_file, start, SEEK_SET) != 0) {
+			buffer[total] = '\0';
+			fclose(log_file);
+			return total;
+		}
+		int character;
+		while ((character = fgetc(log_file)) != EOF && character != '\n') {
+		}
+	} else if (fseek(log_file, 0, SEEK_SET) != 0) {
+		fclose(log_file);
+		return 0;
+	}
 	while (total + 1 < max_size) {
 		size_t chunk = fread(buffer + total, 1, max_size - total - 1, log_file);
 		if (chunk == 0) {

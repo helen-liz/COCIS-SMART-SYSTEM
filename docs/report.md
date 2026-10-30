@@ -2,11 +2,15 @@
 
 **Course:** Embedded Systems / Internet of Things  
 **Institution:** Makerere University, College of Computing and Information Sciences  
-**Group:** [Group name / number]  
-**Members:** [Member 1], [Member 2], [Member 3], [Member 4]  
-**Submission date:** [Date, before 2 November 2026]  
-**Wokwi project:** [Paste the shared Wokwi project link]  
-**Repository:** [Paste the repository link]
+**Submission date:** 2 November 2026  
+**Repository:** https://github.com/helen-liz/COCIS-SMART-SYSTEM
+
+| Submission detail | Value |
+| --- | --- |
+| Group name / number | |
+| Group members and registration numbers | |
+| Wokwi simulation project link | |
+| Individual demonstration video links | See [individual-contributions.md](individual-contributions.md) |
 
 ## Abstract
 
@@ -20,9 +24,9 @@ anti-passback, and drives two door relays. Room controllers combine a reader, a
 passive infrared sensor, and a light relay. All terminals persist configuration and
 access records in non-volatile storage, exchange occupancy counts over ESP-NOW, and
 provide a serial management console, an SSD1306 OLED dashboard, and an optional
-Wi-Fi web dashboard. The firmware was implemented in C with ESP-IDF 6.0.2 and built
+Wi-Fi web dashboard. The firmware was implemented in C with ESP-IDF 5.4 and built
 successfully for the ESP32, using 56% of the application partition without the web
-dashboard and 60% with it. The result is a coherent pilot that demonstrates access
+dashboard and approximately 60% with it. The result is a coherent pilot that demonstrates access
 control, occupancy monitoring, lighting automation, security modes, and three
 operator interfaces on inexpensive hardware.
 
@@ -242,7 +246,7 @@ cloned cards or physical tampering. Section 7 discusses the limitations.
 
 | Item | Version / setting |
 | --- | --- |
-| Framework | ESP-IDF 6.0.2 |
+| Framework | ESP-IDF 5.4 |
 | Language | C (GNU23) |
 | Target | ESP32 (Xtensa LX6, 4 MB flash) |
 | Build system | CMake + Ninja |
@@ -277,16 +281,17 @@ snapshot, and CSV log.
 
 Room occupancy is the local count plus contributions received from peer terminals
 with the same room ID. Each terminal broadcasts its contribution every second with
-a room ID, sequence number, and uptime. Peers ignore reports with a mismatched room
-ID or a report older than 10 seconds. The local count is persisted in NVS so that a
-reboot does not reset the room to zero.
+a magic marker, room ID, and occupancy value. Peers ignore reports with a mismatched
+room ID or a report older than 10 seconds. The local count is persisted in NVS so
+that a reboot does not reset the room to zero.
 
 Lighting is triggered by either a granted access or PIR motion. The light relay is
-held on for 30 seconds after the last trigger. The PIR is sampled as a digital input;
-a simple debounce prevents repeated triggers from a single motion event. Because the
-system uses one PIR per room, a person who remains completely still for longer than
-the hold period may cause the light to switch off; a longer hold or a second sensor
-would improve this.
+held on for 30 seconds after the last trigger and then switches off when no further
+motion or access occurs; it does not stay on because of a stale card-occupancy count.
+The PIR is sampled as a digital input, and repeated motion while the hold is active
+extends the timer. Because the system uses one PIR per room, a person who remains
+completely still for longer than the hold period may cause the light to switch off;
+a longer hold or a second sensor would improve this.
 
 ### 4.5 Storage and recovery
 
@@ -319,12 +324,12 @@ point that the Wokwi simulator cannot expose.
 
 ### 5.1 Build verification
 
-The firmware was built successfully with ESP-IDF 6.0.2 for the ESP32. Results:
+The firmware was built successfully with ESP-IDF 5.4 for the ESP32. Results:
 
 | Configuration | Binary size | Application partition | Free |
 | --- | ---: | ---: | ---: |
-| Web dashboard disabled (default) | 0xD5D40 (875,840 bytes) | 0x180000 (1,572,864 bytes) | 44% |
-| Web dashboard enabled | 0xE48B0 (936,112 bytes) | 0x180000 (1,572,864 bytes) | 40% |
+| Web dashboard disabled (default) | 0xD72B0 (881,328 bytes) | 0x180000 (1,572,864 bytes) | 44% |
+| Web dashboard enabled | 0xE5910 (940,304 bytes) | 0x180000 (1,572,864 bytes) | 40% |
 
 Both configurations compiled and linked without errors. Warnings were treated as
 errors by the project build flags, so the successful build also confirms that the
@@ -366,6 +371,7 @@ reproduce it.
 | Access logic | Implemented and compile-verified; full card-flow test pending |
 | ESP-NOW | Code path implemented; multi-node test pending |
 | Web dashboard | Build verified with option enabled; host access not possible in Wokwi |
+| UI review fixes | Web last-event time uses the event timestamp; OLED header text no longer overlaps; OLED event overlays expire after their intended timeout; failed enrolments are not double-counted as denials; the dashboard returns the newest CSV records; room occupancy is labelled as room rather than building; room lights use an access/PIR hold timer and switch off after the hold period |
 
 The remaining runtime checks require a Wokwi run with the appropriate terminal role
 and are the first activity in the demonstration video. The report will be updated
@@ -487,3 +493,15 @@ Future work should add:
 
 See [individual-contributions.md](individual-contributions.md). Each member should
 confirm the final wording before submission.
+
+## Appendix D: Submission checklist
+
+| Deliverable | Status / location |
+| --- | --- |
+| System operation report | This document |
+| Wokwi simulation link | To be added to the submission-details table on page 1 |
+| Individual video demonstrations | Links to be added in [individual-contributions.md](individual-contributions.md) |
+| Individual contributions | Complete the table and member statements in [individual-contributions.md](individual-contributions.md) |
+| Group member details | Complete the submission-details table on page 1 |
+| Firmware / Wokwi upload file | `build/wokwi-firmware.bin` (default Lecture Room 1 role) |
+| Local Wokwi configuration | `diagram.json` and `wokwi.toml` |

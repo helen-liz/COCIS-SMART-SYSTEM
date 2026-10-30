@@ -25,4 +25,6 @@ if errorlevel 1 exit /b %errorlevel%
 copy /Y build-room2\Smart-System.elf build\room2.elf >nul
 copy /Y build-room2\Smart-System.bin build\room2.bin >nul
 copy /Y build-room2\merged-binary.bin build\room2-wokwi.bin >nul
+copy /Y build-room2\merged-binary.bin build\wokwi-firmware.bin >nul
+copy /Y build-room2\flasher_args.json build\flasher_args.json >nul
 echo Lecture Room 2 firmware built in build\room2.elf and build\room2.bin.

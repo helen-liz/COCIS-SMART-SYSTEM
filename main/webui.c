@@ -118,7 +118,7 @@ static const char dashboard_html[] =
 	"async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});"
 	"const s=await r.json();$('room').textContent=s.room_name;$('role').textContent="
 	"'Room ID '+s.room_id+(s.entrance?' · entrance terminal':' · room terminal');"
-	"$('occupancy').innerHTML=s.global_occupancy+'<small>building</small>';"
+	"$('occupancy').innerHTML=s.global_occupancy+'<small>'+(s.entrance?'building':'room')+'</small>';"
 	"$('insideTag').textContent=s.inside_count+' identified';"
 	"$('localTag').textContent='local '+s.local_occupancy;"
 	"$('light').textContent=s.light_on?'ON':'OFF';"
@@ -185,7 +185,12 @@ static esp_err_t status_handler(httpd_req_t *request)
 		struct tm local_time;
 		if (localtime_r(&status.now, &local_time) != NULL) {
 			strftime(clock_text, sizeof(clock_text), "%Y-%m-%d %H:%M:%S", &local_time);
-			strftime(last_time, sizeof(last_time), "%H:%M:%S", &local_time);
+		}
+	}
+	if (status.last_event_time >= 1760000000) {
+		struct tm event_time;
+		if (localtime_r(&status.last_event_time, &event_time) != NULL) {
+			strftime(last_time, sizeof(last_time), "%H:%M:%S", &event_time);
 		}
 	}
 	snprintf(schedule_start, sizeof(schedule_start), "%02u:%02u",

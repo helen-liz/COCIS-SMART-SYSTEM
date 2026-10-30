@@ -68,7 +68,7 @@ merged binary:
 
 | Role | Build command | Upload file |
 | --- | --- | --- |
-| Lecture Room 1 | `build.bat` | `build/wokwi-firmware.bin` |
+| Lecture Room 1 | `build.bat` | `build/room1-wokwi.bin` |
 | Lecture Room 2 | `build-room2.bat` | `build/room2-wokwi.bin` |
 | Main entrance | `build-entrance.bat` | `build/entrance-wokwi.bin` |
 
@@ -160,7 +160,7 @@ a 4 MiB flash device. The CSV log can also be exported from the serial console.
 - A FreeRTOS mutex protects the allowlist, inside list, counters, and security state
   from concurrent console and reader access.
 - Each terminal stores its own occupancy contribution in NVS.
-- Terminals broadcast a signed occupancy contribution over ESP-NOW every second.
+- Terminals broadcast an occupancy contribution over ESP-NOW every second.
   Peers aggregate matching room IDs and ignore reports older than 10 seconds.
 - Access events are appended to SPIFFS only after the state change, and the inside
   list is persisted after each granted entrance/exit.
@@ -180,7 +180,7 @@ a 4 MiB flash device. The CSV log can also be exported from the serial console.
 
 - [System operation report](docs/report.md)
 - [Architecture and diagrams](docs/system-diagrams.md)
-- [Individual contributions template](docs/individual-contributions.md)
+- [Individual contributions](docs/individual-contributions.md)
 
 ## Limitations
 

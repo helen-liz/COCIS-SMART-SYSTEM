@@ -237,8 +237,8 @@ void ui_print_status(const ui_status_t *status)
 	printf("\n");
 
 	label_row("Security", "%s", security);
-	label_row("Occupancy", "%d inside building  ·  local %d", status->global_occupancy,
-			  status->local_occupancy);
+	label_row("Occupancy", "%d %s  ·  local %d", status->global_occupancy,
+			  status->entrance ? "inside building" : "in room", status->local_occupancy);
 	label_row("Inside list", "%u identified people", (unsigned)status->inside_count);
 	row("Lighting     %s  ·  PIR %s  ·  Allowlist %u cards", light, motion,
 		(unsigned)status->allowed_count);
@@ -317,7 +317,7 @@ void ui_print_rooms(const remote_node_info_t *nodes, size_t count)
 {
 	printf("\n");
 	top("ESP-NOW TERMINAL NETWORK");
-	row("This terminal broadcasts a signed occupancy contribution every second.");
+	row("This terminal broadcasts an occupancy contribution every second.");
 	if (count == 0) {
 		row("No remote terminals have been heard yet.");
 		bottom();

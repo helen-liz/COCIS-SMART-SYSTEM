@@ -27,6 +27,7 @@ typedef struct {
 	uint32_t denials;
 	char last_event[64];
 	bool last_event_ok;
+	time_t last_event_time;
 } web_status_t;
 
 void webui_start(uint8_t room_id);

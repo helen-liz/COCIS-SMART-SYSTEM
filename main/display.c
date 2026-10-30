@@ -77,13 +77,14 @@ static const uint8_t font5x7[95][5] = {
 
 static esp_err_t command(const uint8_t *values, size_t count)
 {
-	uint8_t buffer[32];
-	if (count > sizeof(buffer) - 1) {
-		return ESP_ERR_INVALID_SIZE;
+	for (size_t i = 0; i < count; ++i) {
+		uint8_t buffer[2] = {0x00, values[i]};
+		esp_err_t result = i2c_master_transmit(ssd1306, buffer, 2, SSD1306_TIMEOUT_MS);
+		if (result != ESP_OK) {
+			return result;
+		}
 	}
-	buffer[0] = 0x00;
-	memcpy(buffer + 1, values, count);
-	return i2c_master_transmit(ssd1306, buffer, count + 1, SSD1306_TIMEOUT_MS);
+	return ESP_OK;
 }
 
 static void set_pixel(int x, int y, bool on)
@@ -171,7 +172,11 @@ static void draw_text_center(int y, const char *text, uint8_t scale, bool on)
 static void draw_header(const char *right_text)
 {
 	fill_rect(0, 0, DISPLAY_WIDTH, 10, true);
-	draw_text(2, 2, "COCIS SMART", 1, false);
+	int right_x =
+		right_text != NULL ? DISPLAY_WIDTH - 2 - text_width(right_text, 1) : DISPLAY_WIDTH;
+	if (right_text == NULL || right_x >= 2 + text_width("COCIS SMART", 1) + 4) {
+		draw_text(2, 2, "COCIS SMART", 1, false);
+	}
 	if (right_text != NULL) {
 		draw_text_right(DISPLAY_WIDTH - 2, 2, right_text, 1, false);
 	}
@@ -321,6 +326,17 @@ static esp_err_t flush(void)
 	return ESP_OK;
 }
 
+static esp_err_t display_probe(i2c_master_bus_handle_t bus, uint8_t address)
+{
+	for (unsigned attempt = 0; attempt < 3; ++attempt) {
+		if (i2c_master_probe(bus, address, SSD1306_TIMEOUT_MS) == ESP_OK) {
+			return ESP_OK;
+		}
+		vTaskDelay(pdMS_TO_TICKS(50));
+	}
+	return ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t display_init(void)
 {
 	vTaskDelay(pdMS_TO_TICKS(100));
@@ -339,34 +355,52 @@ esp_err_t display_init(void)
 		return result;
 	}
 
-	i2c_device_config_t device_config = {
-		.dev_addr_length = I2C_ADDR_BIT_LEN_7,
-		.device_address = SSD1306_ADDRESS,
-		.scl_speed_hz = 100000,
-	};
-	result = i2c_master_bus_add_device(i2c_bus, &device_config, &ssd1306);
-	if (result != ESP_OK) {
-		ESP_LOGW(TAG, "SSD1306 not found: %s", esp_err_to_name(result));
-		return result;
-	}
-
 	const uint8_t init_sequence[] = {
 		0xAE, 0x20, 0x00, 0xB0, 0xC8, 0x00, 0x10, 0x40, 0x81, 0xCF,
 		0xA1, 0xA6, 0xA8, 0x3F, 0xA4, 0xD3, 0x00, 0xD5, 0x80, 0xD9,
 		0xF1, 0xDA, 0x12, 0xDB, 0x40, 0x8D, 0x14, 0xAF,
 	};
-	result = command(init_sequence, sizeof(init_sequence));
-	if (result != ESP_OK) {
-		i2c_master_bus_rm_device(ssd1306);
-		device_config.device_address = SSD1306_ALT_ADDRESS;
-		result = i2c_master_bus_add_device(i2c_bus, &device_config, &ssd1306);
-		if (result == ESP_OK) {
+	const uint8_t addresses[] = {SSD1306_ADDRESS, SSD1306_ALT_ADDRESS};
+	bool found = false;
+	uint8_t detected_address = 0;
+
+	for (size_t index = 0; index < sizeof(addresses) / sizeof(addresses[0]) && !found;
+		 ++index) {
+		uint8_t address = addresses[index];
+		for (unsigned attempt = 0; attempt < 3 && !found; ++attempt) {
+			i2c_device_config_t device_config = {
+				.dev_addr_length = I2C_ADDR_BIT_LEN_7,
+				.device_address = address,
+				.scl_speed_hz = 100000,
+			};
+			result = i2c_master_bus_add_device(i2c_bus, &device_config, &ssd1306);
+			if (result != ESP_OK) {
+				vTaskDelay(pdMS_TO_TICKS(50));
+				continue;
+			}
 			result = command(init_sequence, sizeof(init_sequence));
+			if (result == ESP_OK) {
+				found = true;
+				detected_address = address;
+				break;
+			}
+			i2c_master_bus_rm_device(ssd1306);
+			ssd1306 = NULL;
+			vTaskDelay(pdMS_TO_TICKS(50));
 		}
 	}
-	if (result != ESP_OK) {
-		ESP_LOGW(TAG, "SSD1306 unavailable on 0x3C/0x3D; serial UI remains active");
-		ssd1306 = NULL;
+
+	if (!found) {
+		for (size_t index = 0; index < sizeof(addresses) / sizeof(addresses[0]); ++index) {
+			if (display_probe(i2c_bus, addresses[index]) == ESP_OK) {
+				ESP_LOGW(TAG, "SSD1306 ACKs at 0x%02X but did not initialise",
+						 addresses[index]);
+			}
+		}
+		ESP_LOGW(TAG,
+				 "SSD1306 unavailable on 0x%02X/0x%02X; check SDA %d / SCL %d and power; serial UI remains active",
+				 SSD1306_ADDRESS, SSD1306_ALT_ADDRESS,
+				 SMART_SYSTEM_PIN_OLED_SDA, SMART_SYSTEM_PIN_OLED_SCL);
 		return ESP_OK;
 	}
 	display_available = true;
@@ -374,8 +408,8 @@ esp_err_t display_init(void)
 	draw_text_center(24, "COCIS", 3, true);
 	draw_text_center(46, "SMART SYSTEM", 1, true);
 	flush();
-	ESP_LOGI(TAG, "SSD1306 status display ready on SDA %d / SCL %d",
-			 SMART_SYSTEM_PIN_OLED_SDA, SMART_SYSTEM_PIN_OLED_SCL);
+	ESP_LOGI(TAG, "SSD1306 status display ready on 0x%02X (SDA %d / SCL %d)",
+			 detected_address, SMART_SYSTEM_PIN_OLED_SDA, SMART_SYSTEM_PIN_OLED_SCL);
 	return ESP_OK;
 }
 
@@ -414,7 +448,7 @@ void display_tick(const display_state_t *state)
 		return;
 	}
 	TickType_t now = xTaskGetTickCount();
-	if (overlay_active && (TickType_t)(now - overlay_until) < 0x80000000u) {
+	if (overlay_active && (int32_t)(overlay_until - now) > 0) {
 		return;
 	}
 	if (overlay_active) {

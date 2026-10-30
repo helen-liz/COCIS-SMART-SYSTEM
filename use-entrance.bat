@@ -6,4 +6,6 @@ if not exist build\entrance.elf (
 )
 copy /Y build\entrance.elf build\Smart-System.elf >nul
 copy /Y build\entrance.bin build\Smart-System.bin >nul
+copy /Y build\entrance-wokwi.bin build\wokwi-firmware.bin >nul
+copy /Y build-entrance\flasher_args.json build\flasher_args.json >nul
 echo Done. Start Wokwi simulator now (F1 -^> Wokwi: Start Simulator)
