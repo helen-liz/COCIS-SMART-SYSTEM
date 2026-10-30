@@ -105,7 +105,7 @@
       "attrs": { "color": "green", "label": "Exit door" }
     },
     {
-      "type": "board-sd-card",
+      "type": "wokwi-microsd-card",
       "id": "sdcard",
       "top": 670,
       "left": 330,
@@ -163,9 +163,9 @@
     [ "exit_load_resistor:2", "exit_indicator:A", "orange", [] ],
     [ "exit_indicator:C", "esp:GND.2", "black", [] ],
 
-    [ "esp:D18", "sdcard:CLK", "green", [] ],
-    [ "esp:D23", "sdcard:MOSI", "green", [] ],
-    [ "esp:D19", "sdcard:MISO", "green", [] ],
+    [ "esp:D18", "sdcard:SCK", "green", [] ],
+    [ "esp:D23", "sdcard:DI", "green", [] ],
+    [ "esp:D19", "sdcard:DO", "green", [] ],
     [ "esp:D15", "sdcard:CS", "yellow", [] ],
     [ "esp:3V3", "sdcard:VCC", "red", [] ],
     [ "esp:GND.2", "sdcard:GND", "black", [] ]
