@@ -145,7 +145,7 @@ void storage_write_event(const room_profile_t *profile, const char *event,
 	}
 	ESP_LOGI(TAG, "room=%u (%s) %s uid=%s %s",
 			 (unsigned)profile->room_id, profile->name, event, uid_text, detail);
-	if (!spiffs_mounted) {
+	if (!sd_mounted) {
 		return;
 	}
 	bool new_file = access(ACCESS_LOG_PATH, F_OK) != 0;
@@ -175,8 +175,8 @@ void storage_write_event(const room_profile_t *profile, const char *event,
 
 void storage_print_logs(void)
 {
-	if (!spiffs_mounted) {
-		printf("Local log storage is unavailable.\n");
+	if (!sd_mounted) {
+		printf("SD card storage is unavailable.\n");
 		return;
 	}
 	FILE *log_file = fopen(ACCESS_LOG_PATH, "r");
@@ -197,7 +197,7 @@ size_t storage_read_logs(char *buffer, size_t max_size)
 		return 0;
 	}
 	buffer[0] = '\0';
-	if (!spiffs_mounted) {
+	if (!sd_mounted) {
 		return 0;
 	}
 	FILE *log_file = fopen(ACCESS_LOG_PATH, "r");
@@ -253,14 +253,14 @@ size_t storage_read_logs(char *buffer, size_t max_size)
 
 void storage_clear_logs(void)
 {
-	if (spiffs_mounted) {
+	if (sd_mounted) {
 		remove(ACCESS_LOG_PATH);
 	}
 }
 
 size_t storage_log_size(void)
 {
-	if (!spiffs_mounted) {
+	if (!sd_mounted) {
 		return 0;
 	}
 	struct stat info;
