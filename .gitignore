@@ -19,6 +19,9 @@
 # Build artifacts and directories
 **/build/
 build/
+build-room2/
+build-room2-test/
+build-entrance/
 *.o
 *.a
 *.out

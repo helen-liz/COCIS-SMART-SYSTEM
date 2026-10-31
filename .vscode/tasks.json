@@ -1,0 +1,77 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Room 1",
+      "type": "process",
+      "command": "cmd.exe",
+      "args": ["/c", "build.bat"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Room 2",
+      "type": "process",
+      "command": "cmd.exe",
+      "args": ["/c", "build-room2.bat"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Entrance",
+      "type": "process",
+      "command": "cmd.exe",
+      "args": ["/c", "build-entrance.bat"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Select Room 1",
+      "type": "process",
+      "command": "cmd.exe",
+      "args": ["/c", "echo. | use-room1.bat"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Select Room 2",
+      "type": "process",
+      "command": "cmd.exe",
+      "args": ["/c", "echo. | use-room2.bat"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Select Entrance",
+      "type": "process",
+      "command": "cmd.exe",
+      "args": ["/c", "echo. | use-entrance.bat"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build & Select Room 1",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Build Room 1", "Select Room 1"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build & Select Room 2",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Build Room 2", "Select Room 2"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build & Select Entrance",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Build Entrance", "Select Entrance"],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

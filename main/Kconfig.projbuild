@@ -1,0 +1,44 @@
+menu "CoCIS Smart System"
+
+choice SMART_SYSTEM_TERMINAL_ROLE
+    prompt "Terminal role"
+    default SMART_SYSTEM_ROLE_ROOM1
+    help
+        Selects which pilot terminal this firmware image implements.
+        Build one image per terminal role.
+
+    config SMART_SYSTEM_ROLE_ENTRANCE
+        bool "Main entrance (entry + exit RFID sections)"
+    config SMART_SYSTEM_ROLE_ROOM1
+        bool "Lecture Room 1"
+    config SMART_SYSTEM_ROLE_ROOM2
+        bool "Lecture Room 2"
+endchoice
+
+config SMART_SYSTEM_EXIT_NODE
+    bool "Room terminal acts as the exit section"
+    depends on SMART_SYSTEM_ROLE_ROOM1 || SMART_SYSTEM_ROLE_ROOM2
+    default n
+    help
+        Room terminals can be built as entry or exit nodes. The main entrance
+        image always provides both sections on one ESP32.
+
+config SMART_SYSTEM_ENABLE_OLED
+    bool "Enable the SSD1306 status display"
+    default y
+    help
+        Adds the 128x64 I2C status dashboard.
+
+config SMART_SYSTEM_ENABLE_WEB
+    bool "Enable the Wi-Fi web dashboard"
+    default n
+    help
+        Starts a SoftAP and a read-only browser dashboard. Disabled by default
+        because the Wokwi simulator cannot reach the simulated access point.
+
+config SMART_SYSTEM_WEB_AP_PASSWORD
+    string "Web dashboard access point password"
+    depends on SMART_SYSTEM_ENABLE_WEB
+    default "cocis2026"
+
+endmenu
